@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import math
 import shutil
 import hashlib
 import tempfile
@@ -10,7 +9,6 @@ from io import BytesIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import numpy as np
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -39,6 +37,35 @@ DEFAULT_SLIDE_DURATION = 7.0
 MIN_SLIDE_DURATION_WITH_AUDIO = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
+
+
+# =========================
+# Helpers: PIN gate
+# =========================
+def require_pin_if_configured():
+    """Si st.secrets tiene APP_PIN, exige PIN para continuar."""
+    app_pin = st.secrets.get("APP_PIN", "")
+    if not app_pin:
+        return  # no gate
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return
+
+    st.warning("🔒 Esta app está protegida con PIN.")
+    pin = st.text_input("Ingresa el PIN", type="password")
+    if st.button("Entrar", type="primary"):
+        if pin == app_pin:
+            st.session_state.authenticated = True
+            st.success("Acceso concedido ✅")
+            st.rerun()
+        else:
+            st.error("PIN incorrecto ❌")
+
+    st.stop()
+
 
 # =========================
 # Texto: normalización y segmentación
@@ -103,6 +130,7 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
         fr = fr.strip()
         if not fr:
             continue
+
         cand = (" ".join(buf + [fr])).strip()
 
         if len(cand) <= max_chars and len(buf) < max_sentences:
@@ -114,6 +142,7 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
         flush()
 
         if len(fr) > max_chars:
+            # partir por palabras
             words = fr.split()
             tmp = []
             for w in words:
@@ -134,11 +163,9 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
 
 
 # =========================
-# Fuente (opcional)
+# Fuente (simple)
 # =========================
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    # Si quieres una fuente custom, súbela al repo (ej: assets/Calibri-Bold.ttf)
-    # y cárgala aquí. Para simplificar, intentamos DejaVu (suele existir) y fallback.
     for candidate in ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf"]:
         try:
             return ImageFont.truetype(candidate, size)
@@ -148,8 +175,9 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
 
 
 # =========================
-# Scraper eltiempo
+# Scraper eltiempo (cache)
 # =========================
+@st.cache_data(show_spinner=False, ttl=60 * 30)
 def extraer_contenido_articulo(url: str) -> tuple[str, list[str], list[str]]:
     r = requests.get(url, headers=HEADERS_FAKE, timeout=30)
     r.raise_for_status()
@@ -263,14 +291,12 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
         return [out]
 
     fuente = load_font(font_size)
-    d0 = ImageDraw.Draw(fondo)
 
-    # wrap aproximado
     max_width_px = 1800
     wrap_width = max(18, max_width_px // max(1, (font_size // 2)))
-    lineas = textwrap.wrap(texto, width=wrap_width, break_long_words=False, break_on_hyphens=False)
+    lineas = re.sub(r"\s+", " ", texto).strip()
+    lineas = __import__("textwrap").wrap(lineas, width=wrap_width, break_long_words=False, break_on_hyphens=False)
 
-    # 2 líneas por imagen, si hay más -> varias imágenes
     bloques = [lineas[i:i+2] for i in range(0, len(lineas), 2)]
     outs = []
 
@@ -309,6 +335,7 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
 # =========================
 # ElevenLabs: voces y TTS largo
 # =========================
+@st.cache_data(show_spinner=False, ttl=60 * 30)
 def eleven_get_voices(api_key: str) -> list[dict]:
     r = requests.get(f"{ELEVEN_BASE}/v1/voices", headers={"xi-api-key": api_key}, timeout=30)
     r.raise_for_status()
@@ -318,7 +345,13 @@ def eleven_get_voices(api_key: str) -> list[dict]:
 def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
-def pick_voice(voices: list[dict], name_contains: str, gender: str, language: str) -> tuple[str, dict]:
+def pick_voice(voices: list[dict], name_contains: str, gender: str, language: str, voice_id_direct: str) -> tuple[str, dict]:
+    if voice_id_direct:
+        for v in voices:
+            if v.get("voice_id") == voice_id_direct:
+                return voice_id_direct, v
+        raise ValueError("VOICE_ID no encontrado en tu cuenta.")
+
     name_contains_n = _norm(name_contains)
     gender_n = _norm(gender)
     lang_n = _norm(language)
@@ -331,14 +364,17 @@ def pick_voice(voices: list[dict], name_contains: str, gender: str, language: st
 
         if name_contains_n:
             s += 50 if name_contains_n in name else -10
+
         if gender_n:
             g = labels_n.get("gender", "")
             if g:
                 s += 15 if gender_n in g else -5
+
         if lang_n:
             l = labels_n.get("language", "")
             if l:
                 s += 10 if (lang_n in l or l in lang_n) else -3
+
         return s
 
     best = sorted(voices, key=score, reverse=True)[0]
@@ -394,9 +430,6 @@ def ffmpeg_exe() -> str:
 
 def eleven_tts_long_to_mp3(text: str, api_key: str, voice_id: str, model_id: str,
                            output_format: str, voice_settings: dict, out_mp3: Path, work_dir: Path) -> Path:
-    """
-    Genera mp3 por chunks y concatena con ffmpeg (imageio-ffmpeg, sin depender del sistema).
-    """
     max_chars = model_char_limit(model_id)
     chunks = split_text_chunks(text, max_chars=max_chars)
     if not chunks:
@@ -426,7 +459,7 @@ def eleven_tts_long_to_mp3(text: str, api_key: str, voice_id: str, model_id: str
         p.write_bytes(r.content)
         part_files.append(p)
 
-    # concat list con rutas absolutas (fix del error que te salió)
+    # concat list con rutas absolutas (fix)
     list_file = (parts_dir / "concat_list.txt").resolve()
     with list_file.open("w", encoding="utf-8") as f:
         for p in part_files:
@@ -435,9 +468,11 @@ def eleven_tts_long_to_mp3(text: str, api_key: str, voice_id: str, model_id: str
     out_mp3 = out_mp3.resolve()
     cmd = [ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(out_mp3)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
     if proc.returncode != 0:
-        # fallback: re-encode (más robusto)
-        cmd2 = [ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c:a", "libmp3lame", "-b:a", "128k", str(out_mp3)]
+        # fallback: re-encode
+        cmd2 = [ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+                "-c:a", "libmp3lame", "-b:a", "128k", str(out_mp3)]
         proc2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if proc2.returncode != 0:
             raise RuntimeError("ffmpeg falló concatenando audio:\n" + (proc2.stderr[-1500:] or proc.stderr[-1500:]))
@@ -448,6 +483,11 @@ def eleven_tts_long_to_mp3(text: str, api_key: str, voice_id: str, model_id: str
 # =========================
 # Video
 # =========================
+def safe_filename(title: str, max_len: int = 60) -> str:
+    s = "".join(ch for ch in (title or "") if ch.isalnum() or ch in " _-").strip()
+    s = s[:max_len].strip()
+    return s or "video"
+
 def crear_video(textos_slides: list[str], imagenes: list[Path], titulo: str, audio_path: Path | None, work_dir: Path) -> Path:
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
@@ -486,41 +526,35 @@ def crear_video(textos_slides: list[str], imagenes: list[Path], titulo: str, aud
 
     return out
 
-def safe_filename(title: str, max_len: int = 60) -> str:
-    s = "".join(ch for ch in (title or "") if ch.isalnum() or ch in " _-").strip()
-    s = s[:max_len].strip()
-    return s or "video"
-
 
 # =========================
-# UI Streamlit
+# Streamlit UI
 # =========================
 st.set_page_config(page_title="Nota → Video + Voz", layout="wide")
 st.title("Nota de El Tiempo → Video con narración (ElevenLabs)")
 
-with st.expander("⚠️ Nota", expanded=False):
-    st.write("Este tipo de automatización debe usarse respetando derechos/condiciones del medio y con permisos cuando aplique.")
+# Gate con PIN si está configurado
+require_pin_if_configured()
 
-col1, col2 = st.columns([1.2, 1])
+with st.sidebar:
+    st.header("Modo")
+    simple_mode = st.toggle("Modo 1-click (recomendado)", value=True)
 
-with col1:
-    url = st.text_input("URL del artículo", placeholder="https://www.eltiempo.com/...")
-    btn_extract = st.button("1) Extraer contenido", type="primary")
-
-with col2:
-    st.subheader("Voz (ElevenLabs)")
-    api_key = st.secrets.get("ELEVENLABS_API_KEY", "")  # En Cloud se configura en Secrets UI.  [oai_citation:3‡Streamlit Docs](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management?utm_source=chatgpt.com)
-    if not api_key:
-        st.info("Configura ELEVENLABS_API_KEY en Secrets (Streamlit Cloud).")
+    st.divider()
+    st.header("ElevenLabs")
+    secret_key = st.secrets.get("ELEVENLABS_API_KEY", "")
+    api_key = secret_key or st.text_input("API Key (si no está en Secrets)", type="password")
+    st.caption("Tip: pon la key en Secrets para no pegarla aquí.")
 
     model_id = st.selectbox("Modelo", ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"], index=0)
     output_format = st.selectbox("Formato", ["mp3_44100_128", "mp3_44100_192", "mp3_24000_48", "pcm_44100"], index=0)
 
-    gender = st.selectbox("Preferencia de género (si labels existen)", ["", "female", "male", "neutral"], index=1)
-    language = st.selectbox("Preferencia de idioma (si labels existen)", ["", "es", "spanish", "en", "english"], index=1)
+    voice_id_direct = st.text_input("Voice ID (opcional)", value="")
     name_contains = st.text_input("Nombre de voz contiene (opcional)", value="")
+    gender = st.selectbox("Preferencia género (si labels)", ["", "female", "male", "neutral"], index=1)
+    language = st.selectbox("Preferencia idioma (si labels)", ["", "es", "spanish", "en", "english"], index=1)
 
-    st.write("Ajustes de voz")
+    st.subheader("Voice settings")
     stability = st.slider("stability", 0.0, 1.0, 0.45, 0.01)
     similarity = st.slider("similarity_boost", 0.0, 1.0, 0.75, 0.01)
     style = st.slider("style", 0.0, 1.0, 0.20, 0.01)
@@ -535,63 +569,35 @@ voice_settings = {
     "speed": speed,
 }
 
-if "extracted" not in st.session_state:
-    st.session_state.extracted = None
+st.caption("Si quieres, luego puedes embeber esta app en Google Sites con `?embed=true`.")
 
-if btn_extract and url:
-    with st.spinner("Extrayendo..."):
-        try:
-            titulo, parrafos, img_urls = extraer_contenido_articulo(url)
-            st.session_state.extracted = {
-                "titulo": titulo,
-                "parrafos": parrafos,
-                "img_urls": img_urls,
-            }
-            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes: {len(img_urls)}")
-        except Exception as e:
-            st.session_state.extracted = None
-            st.error(f"No pude extraer: {e}")
+# Inputs comunes
+url = st.text_input("URL del artículo", placeholder="https://www.eltiempo.com/...")
 
-data = st.session_state.extracted
+uploaded = st.file_uploader("Sube imágenes extra (opcional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-if data:
-    st.divider()
-    st.subheader("2) Revisa/edita lo que se va a usar")
+colA, colB, colC = st.columns(3)
+with colA:
+    max_imgs = st.slider("Máx imágenes del artículo", 1, 30, 12)
+with colB:
+    title_max_chars = st.slider("Máx chars título (slide)", 80, 220, 140)
+with colC:
+    body_max_chars = st.slider("Máx chars cuerpo (slide)", 90, 220, 160)
 
-    # Textos seleccionables/editables
-    st.write("### Textos")
-    titulo_in = st.text_input("Título", value=data["titulo"])
-    include_title = st.checkbox("Incluir título", value=True)
+body_max_sent = st.slider("Máx frases por slide", 1, 3, 2)
 
-    st.write("Párrafos (marca lo que quieras narrar/usar):")
-    selected_pars = []
-    for i, p in enumerate(data["parrafos"]):
-        with st.expander(f"Párrafo {i+1}", expanded=False):
-            ck = st.checkbox("Incluir", value=True, key=f"par_ck_{i}")
-            txt = st.text_area("Texto", value=p, height=110, key=f"par_txt_{i}")
-            if ck:
-                selected_pars.append(txt)
+gen_audio = st.checkbox("Generar narración con ElevenLabs", value=True)
 
-    # Imágenes: descarga + uploader extra
-    st.write("### Imágenes")
-    uploaded = st.file_uploader("Sube imágenes extra (opcional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+# =========================
+# MODO 1-CLICK
+# =========================
+if simple_mode:
+    st.subheader("Modo 1-click")
+    st.write("Pegas la URL → eliges voz → Generar. Usa título + todos los párrafos por defecto.")
 
-    max_imgs = st.slider("Máximo de imágenes del artículo a usar", 1, 30, 12)
-    title_max_chars = st.slider("Máx caracteres título (slide)", 80, 220, 140)
-    body_max_chars = st.slider("Máx caracteres cuerpo (slide)", 90, 220, 160)
-    body_max_sent = st.slider("Máx frases por slide", 1, 3, 2)
-
-    gen_audio = st.checkbox("Generar narración con ElevenLabs", value=True)
-
-    btn_generate = st.button("3) Generar video", type="primary")
-
-    if btn_generate:
-        if not include_title and not selected_pars:
-            st.error("No hay textos seleccionados.")
-            st.stop()
-
+    if st.button("Generar video", type="primary", disabled=not bool(url)):
         if gen_audio and not api_key:
-            st.error("Falta ELEVENLABS_API_KEY en Secrets.")
+            st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
             st.stop()
 
         work_dir = Path(tempfile.mkdtemp(prefix="nota_video_"))
@@ -601,33 +607,26 @@ if data:
         progress = st.progress(0, text="Iniciando...")
 
         try:
-            # 1) juntar texto final (narración)
-            textos_seleccionados = []
-            if include_title:
-                textos_seleccionados.append(titulo_in)
-            textos_seleccionados.extend(selected_pars)
+            progress.progress(10, text="Extrayendo contenido...")
+            titulo, parrafos, img_urls = extraer_contenido_articulo(url)
 
+            textos_seleccionados = [titulo] + parrafos
             texto_narracion = normalizar_texto("\n\n".join(textos_seleccionados))
 
-            # 2) generar slides (texto segmentado)
+            # Slides
             textos_slides = []
-            if include_title:
-                t = normalizar_texto(titulo_in)[:title_max_chars]
-                textos_slides.extend(segmentar_para_slides(t, max_chars=title_max_chars, max_sentences=1))
-
-            for p in selected_pars:
+            t = normalizar_texto(titulo)[:title_max_chars]
+            textos_slides.extend(segmentar_para_slides(t, max_chars=title_max_chars, max_sentences=1))
+            for p in parrafos:
                 textos_slides.extend(segmentar_para_slides(p, max_chars=body_max_chars, max_sentences=body_max_sent))
 
             if not textos_slides:
                 raise ValueError("No quedaron textos para slides tras segmentar.")
 
-            progress.progress(10, text="Descargando imágenes...")
+            progress.progress(25, text="Descargando imágenes...")
+            downloaded_imgs = descargar_imagenes(img_urls[:max_imgs], imgs_dir, max_workers=10)
 
-            # 3) descargar imágenes del artículo
-            img_urls = data["img_urls"][:max_imgs]
-            downloaded_imgs = descargar_imagenes(img_urls, imgs_dir, max_workers=10)
-
-            # 4) agregar imágenes subidas
+            # Agregar uploads
             if uploaded:
                 for uf in uploaded:
                     img = Image.open(BytesIO(uf.read()))
@@ -639,16 +638,14 @@ if data:
             if not downloaded_imgs:
                 raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
 
-            progress.progress(35, text="Eligiendo voz...")
-
-            # 5) elegir voz y generar audio
             audio_path = None
             if gen_audio:
+                progress.progress(45, text="Listando voces...")
                 voices = eleven_get_voices(api_key)
-                voice_id, voice_obj = pick_voice(voices, name_contains=name_contains, gender=gender, language=language)
-                st.info(f"Voz elegida: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
-                progress.progress(55, text="Generando narración (ElevenLabs)...")
+                voice_id, voice_obj = pick_voice(voices, name_contains, gender, language, voice_id_direct)
+                st.info(f"Voz: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
 
+                progress.progress(60, text="Generando narración (ElevenLabs)...")
                 audio_path = eleven_tts_long_to_mp3(
                     text=texto_narracion,
                     api_key=api_key,
@@ -660,20 +657,12 @@ if data:
                     work_dir=work_dir,
                 )
 
-            progress.progress(75, text="Renderizando video...")
-
-            # 6) crear video
-            out_video = crear_video(
-                textos_slides=textos_slides,
-                imagenes=downloaded_imgs,
-                titulo=titulo_in or "video",
-                audio_path=audio_path,
-                work_dir=work_dir,
-            )
+            progress.progress(80, text="Renderizando video...")
+            out_video = crear_video(textos_slides, downloaded_imgs, titulo, audio_path, work_dir)
 
             progress.progress(100, text="Listo ✅")
-
             st.success("Video creado.")
+
             video_bytes = out_video.read_bytes()
             st.video(video_bytes)
             st.download_button("Descargar MP4", data=video_bytes, file_name=out_video.name, mime="video/mp4")
@@ -681,8 +670,129 @@ if data:
         except Exception as e:
             st.error(f"Error: {e}")
         finally:
-            # En Cloud, el FS es efímero; igual limpiamos.
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)
             except Exception:
                 pass
+
+# =========================
+# MODO AVANZADO
+# =========================
+else:
+    st.subheader("Modo avanzado")
+    st.write("Extrae, luego selecciona/edita párrafos e imágenes antes de generar.")
+
+    if "extracted" not in st.session_state:
+        st.session_state.extracted = None
+
+    if st.button("1) Extraer contenido", type="primary", disabled=not bool(url)):
+        try:
+            with st.spinner("Extrayendo..."):
+                titulo, parrafos, img_urls = extraer_contenido_articulo(url)
+            st.session_state.extracted = {"titulo": titulo, "parrafos": parrafos, "img_urls": img_urls}
+            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes: {len(img_urls)}")
+        except Exception as e:
+            st.session_state.extracted = None
+            st.error(f"No pude extraer: {e}")
+
+    data = st.session_state.extracted
+    if data:
+        st.divider()
+        st.write("### Textos")
+        include_title = st.checkbox("Incluir título", value=True)
+        titulo_in = st.text_input("Título", value=data["titulo"])
+
+        st.write("Párrafos:")
+        selected_pars = []
+        for i, p in enumerate(data["parrafos"]):
+            with st.expander(f"Párrafo {i+1}", expanded=False):
+                ck = st.checkbox("Incluir", value=True, key=f"par_ck_{i}")
+                txt = st.text_area("Texto", value=p, height=110, key=f"par_txt_{i}")
+                if ck:
+                    selected_pars.append(txt)
+
+        btn_generate = st.button("2) Generar video", type="primary")
+        if btn_generate:
+            if gen_audio and not api_key:
+                st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
+                st.stop()
+
+            textos_seleccionados = []
+            if include_title:
+                textos_seleccionados.append(titulo_in)
+            textos_seleccionados.extend(selected_pars)
+
+            if not textos_seleccionados:
+                st.error("No hay textos seleccionados.")
+                st.stop()
+
+            work_dir = Path(tempfile.mkdtemp(prefix="nota_video_"))
+            imgs_dir = work_dir / "imgs"
+            imgs_dir.mkdir(exist_ok=True)
+
+            progress = st.progress(0, text="Iniciando...")
+            try:
+                progress.progress(15, text="Preparando textos...")
+                titulo_final = normalizar_texto(titulo_in) if include_title else "video"
+                texto_narracion = normalizar_texto("\n\n".join(textos_seleccionados))
+
+                textos_slides = []
+                if include_title:
+                    t = normalizar_texto(titulo_in)[:title_max_chars]
+                    textos_slides.extend(segmentar_para_slides(t, max_chars=title_max_chars, max_sentences=1))
+                for p in selected_pars:
+                    textos_slides.extend(segmentar_para_slides(p, max_chars=body_max_chars, max_sentences=body_max_sent))
+
+                if not textos_slides:
+                    raise ValueError("No quedaron textos para slides tras segmentar.")
+
+                progress.progress(35, text="Descargando imágenes...")
+                img_urls = data["img_urls"][:max_imgs]
+                downloaded_imgs = descargar_imagenes(img_urls, imgs_dir, max_workers=10)
+
+                if uploaded:
+                    for uf in uploaded:
+                        img = Image.open(BytesIO(uf.read()))
+                        img = ajustar_imagen(img).convert("RGB")
+                        p = imgs_dir / f"upload_{uf.name}"
+                        img.save(p, quality=92)
+                        downloaded_imgs.append(p)
+
+                if not downloaded_imgs:
+                    raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
+
+                audio_path = None
+                if gen_audio:
+                    progress.progress(55, text="Listando voces...")
+                    voices = eleven_get_voices(api_key)
+                    voice_id, voice_obj = pick_voice(voices, name_contains, gender, language, voice_id_direct)
+                    st.info(f"Voz: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
+
+                    progress.progress(70, text="Generando narración...")
+                    audio_path = eleven_tts_long_to_mp3(
+                        text=texto_narracion,
+                        api_key=api_key,
+                        voice_id=voice_id,
+                        model_id=model_id,
+                        output_format=output_format,
+                        voice_settings=voice_settings,
+                        out_mp3=work_dir / "narracion.mp3",
+                        work_dir=work_dir,
+                    )
+
+                progress.progress(85, text="Renderizando video...")
+                out_video = crear_video(textos_slides, downloaded_imgs, titulo_final, audio_path, work_dir)
+
+                progress.progress(100, text="Listo ✅")
+                st.success("Video creado.")
+                video_bytes = out_video.read_bytes()
+                st.video(video_bytes)
+                st.download_button("Descargar MP4", data=video_bytes, file_name=out_video.name, mime="video/mp4")
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                try:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                except Exception:
+                    pass
