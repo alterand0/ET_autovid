@@ -1,4 +1,3 @@
-import os
 import re
 import json
 import shutil
@@ -43,7 +42,7 @@ ELEVEN_BASE = "https://api.elevenlabs.io"
 SLIDE_TEXT_MAX_CHARS = 60
 SLIDE_TEXT_MAX_SENTENCES = 1
 
-# Render: 30 chars line wrap, 2 lines per image
+# Render: 30 chars per line wrap, 2 lines per image
 RENDER_WRAP_WIDTH = 30
 RENDER_LINES_PER_IMAGE = 2
 
@@ -52,9 +51,6 @@ RENDER_LINES_PER_IMAGE = 2
 # PIN gate
 # =========================
 def require_pin_if_configured():
-    """
-    Pide PIN si st.secrets tiene APP_PIN.
-    """
     app_pin = st.secrets.get("APP_PIN", "")
     if not app_pin:
         return
@@ -124,10 +120,6 @@ def dividir_en_frases(texto: str) -> list[str]:
     return frases
 
 def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> list[str]:
-    """
-    Segmenta en bloques cortos para slides (antes del wrap 30/2).
-    No corta palabras; si una frase excede max_chars, se parte por palabras.
-    """
     frases = dividir_en_frases(texto)
     if not frases:
         t = normalizar_texto(texto)
@@ -181,7 +173,6 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
 # FONT
 # =========================
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    # En Streamlit Cloud suele existir DejaVu
     for candidate in ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf"]:
         try:
             return ImageFont.truetype(candidate, size)
@@ -314,6 +305,7 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
 
     fuente = load_font(font_size)
 
+    # 30 chars/line, sin cortar palabras
     lineas = textwrap.wrap(
         re.sub(r"\s+", " ", texto).strip(),
         width=RENDER_WRAP_WIDTH,
@@ -588,7 +580,7 @@ voice_settings = {
     "speed": speed,
 }
 
-st.caption("Solo modo avanzado (selección por marcación).")
+st.caption("Modo avanzado (selección por marcación).")
 
 url = st.text_input("URL del artículo", placeholder="https://www.eltiempo.com/...")
 uploaded = st.file_uploader("Sube imágenes extra (opcional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
@@ -599,7 +591,6 @@ with c1:
 with c2:
     gen_audio = st.checkbox("Generar narración con ElevenLabs", value=True)
 
-# Estado
 if "extracted" not in st.session_state:
     st.session_state.extracted = None
 
@@ -642,13 +633,13 @@ if data:
             st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
             st.stop()
 
-        textos_seleccionados = []
         if include_title:
-            textos_seleccionados.append(titulo_in)
-        textos_seleccionados.extend(selected_pars)
+            if not (titulo_in or "").strip():
+                st.error("Marcaste 'Incluir título' pero el título está vacío.")
+                st.stop()
 
-        if not textos_seleccionados:
-            st.error("No hay textos seleccionados.")
+        if not selected_pars and not include_title:
+            st.error("No hay textos seleccionados (ni título ni párrafos).")
             st.stop()
 
         work_dir = Path(tempfile.mkdtemp(prefix="nota_video_"))
@@ -661,19 +652,25 @@ if data:
             progress.progress(10, text="Preparando textos...")
 
             titulo_final = normalizar_texto(titulo_in) if include_title else "video"
-            texto_narracion = normalizar_texto("\n\n".join(textos_seleccionados))
 
-            # Slides (≈ 60 chars por bloque, luego render_slide aplica 30/2)
+            # ✅ Construimos los slides SOLO con textos seleccionados
             textos_slides = []
             if include_title:
                 t = normalizar_texto(titulo_in)
-                textos_slides.extend(segmentar_para_slides(t, max_chars=SLIDE_TEXT_MAX_CHARS, max_sentences=SLIDE_TEXT_MAX_SENTENCES))
+                textos_slides.extend(
+                    segmentar_para_slides(t, max_chars=SLIDE_TEXT_MAX_CHARS, max_sentences=SLIDE_TEXT_MAX_SENTENCES)
+                )
 
             for p in selected_pars:
-                textos_slides.extend(segmentar_para_slides(p, max_chars=SLIDE_TEXT_MAX_CHARS, max_sentences=SLIDE_TEXT_MAX_SENTENCES))
+                textos_slides.extend(
+                    segmentar_para_slides(p, max_chars=SLIDE_TEXT_MAX_CHARS, max_sentences=SLIDE_TEXT_MAX_SENTENCES)
+                )
 
             if not textos_slides:
                 raise ValueError("No quedaron textos para slides tras segmentar.")
+
+            # ✅ Narración = EXACTAMENTE lo que aparece en los slides (si quitas párrafos, NO se narran)
+            texto_narracion = normalizar_texto(" ".join(textos_slides))
 
             progress.progress(30, text="Descargando imágenes...")
             downloaded_imgs = descargar_imagenes(data["img_urls"][:max_imgs], imgs_dir, max_workers=10)
