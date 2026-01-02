@@ -573,7 +573,7 @@ with st.sidebar:
     st.caption("Recomendado: configúrala en Secrets.")
 
     model_id = st.selectbox("Modelo", ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"], index=0)
-    output_format = st.selectbox("Formato", ["mp3_44100_128", "mp3_44100_192", "mp3_24000_48", "pcm_44100"], index=0)
+    output_format = st.selectbox("Formato", ["mp3_44100_128", "mp3_44100_192", "mp3_24000_48", "pcm_44100", "pcm_16000", "ulaw_8000"], index=0)
 
     # ✅ Voice ID por defecto
     voice_id_direct = st.text_input("Voice ID", value=DEFAULT_VOICE_ID)
