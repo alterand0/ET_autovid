@@ -38,13 +38,19 @@ MIN_SLIDE_DURATION_WITH_AUDIO = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
 
-# Slides: 30 chars/line, 2 lines/slide => ~60 chars por bloque
+# Texto por slide (antes del wrap 30/2)
 SLIDE_TEXT_MAX_CHARS = 60
 SLIDE_TEXT_MAX_SENTENCES = 1
 
-# Render: 30 chars per line wrap, 2 lines per image
+# Render: 30 chars por línea, 2 líneas por imagen
 RENDER_WRAP_WIDTH = 30
 RENDER_LINES_PER_IMAGE = 2
+
+# ✅ Tamaño de fuente
+FONT_SIZE = 50
+
+# ✅ Voice ID por defecto (lo pediste fijo)
+DEFAULT_VOICE_ID = "4XUsiqPDK4UACIM2BILe"
 
 
 # =========================
@@ -120,6 +126,9 @@ def dividir_en_frases(texto: str) -> list[str]:
     return frases
 
 def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> list[str]:
+    """
+    Segmenta en bloques cortos (sin cortar palabras).
+    """
     frases = dividir_en_frases(texto)
     if not frases:
         t = normalizar_texto(texto)
@@ -170,15 +179,13 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
 
 def split_paragraphs_from_manual(text: str) -> list[str]:
     """
-    Divide en párrafos usando líneas en blanco como separador.
+    Divide en párrafos por líneas en blanco.
     """
     t = (text or "").strip()
     if not t:
         return []
-    # normaliza saltos
     t = t.replace("\r\n", "\n").replace("\r", "\n")
     parts = [p.strip() for p in re.split(r"\n\s*\n+", t) if p.strip()]
-    # filtra basura muy corta
     return [p for p in parts if len(normalizar_texto(p)) >= 10]
 
 
@@ -311,7 +318,7 @@ def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
             continue
     return paths
 
-def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = 65) -> list[Path]:
+def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:
     """
     - Máx 30 chars por línea
     - Máx 2 líneas por imagen (si hay más, crea más imágenes)
@@ -380,50 +387,8 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
 
 
 # =========================
-# ElevenLabs: voices + long TTS
+# ElevenLabs: long TTS
 # =========================
-@st.cache_data(show_spinner=False, ttl=60 * 30)
-def eleven_get_voices(api_key: str) -> list[dict]:
-    r = requests.get(f"{ELEVEN_BASE}/v1/voices", headers={"xi-api-key": api_key}, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    return data.get("voices", data)
-
-def _norm(s: str) -> str:
-    return (s or "").strip().lower()
-
-def pick_voice(voices: list[dict], name_contains: str, gender: str, language: str, voice_id_direct: str) -> tuple[str, dict]:
-    if voice_id_direct:
-        for v in voices:
-            if v.get("voice_id") == voice_id_direct:
-                return voice_id_direct, v
-        raise ValueError("VOICE_ID no encontrado en tu cuenta.")
-
-    name_contains_n = _norm(name_contains)
-    gender_n = _norm(gender)
-    lang_n = _norm(language)
-
-    def score(v: dict) -> int:
-        s = 0
-        name = _norm(v.get("name"))
-        labels = v.get("labels") or {}
-        labels_n = {_norm(k): _norm(str(val)) for k, val in labels.items()}
-
-        if name_contains_n:
-            s += 50 if name_contains_n in name else -10
-        if gender_n:
-            g = labels_n.get("gender", "")
-            if g:
-                s += 15 if gender_n in g else -5
-        if lang_n:
-            l = labels_n.get("language", "")
-            if l:
-                s += 10 if (lang_n in l or l in lang_n) else -3
-        return s
-
-    best = sorted(voices, key=score, reverse=True)[0]
-    return best["voice_id"], best
-
 def model_char_limit(model_id: str) -> int:
     if model_id == "eleven_multilingual_v2":
         return 9500
@@ -527,15 +492,24 @@ def safe_filename(title: str, max_len: int = 60) -> str:
     s = s[:max_len].strip()
     return s or "video"
 
-def crear_video(textos_slides: list[str], imagenes: list[Path], titulo: str, audio_path: Path | None, work_dir: Path) -> Path:
+def crear_video(
+    textos_slides: list[str],
+    imagenes: list[Path],
+    titulo: str,
+    audio_path: Path | None,
+    work_dir: Path,
+    overlay_text: bool
+) -> Path:
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
 
+    # Genera imágenes (con o sin texto)
     slide_imgs = []
     for idx, txt in enumerate(textos_slides):
         img_path = imagenes[idx % len(imagenes)]
-        slide_imgs.extend(render_slide(img_path, txt, idx, slides_dir))
+        slide_imgs.extend(render_slide(img_path, txt if overlay_text else "", idx, slides_dir, font_size=FONT_SIZE))
 
+    # Duración por slide
     audio_clip = None
     if audio_path and audio_path.exists():
         audio_clip = AudioFileClip(str(audio_path))
@@ -547,6 +521,7 @@ def crear_video(textos_slides: list[str], imagenes: list[Path], titulo: str, aud
     clips = [ImageClip(str(p)).set_duration(dur) for p in slide_imgs]
     final = concatenate_videoclips(clips, method="compose")
 
+    # Audio
     if audio_clip:
         final = final.set_audio(audio_clip).set_duration(audio_clip.duration)
 
@@ -567,6 +542,22 @@ def crear_video(textos_slides: list[str], imagenes: list[Path], titulo: str, aud
 
 
 # =========================
+# HELPERS: build slides from selection
+# =========================
+def build_textos_slides(include_title: bool, titulo: str, selected_pars: list[str]) -> list[str]:
+    textos_slides = []
+    if include_title:
+        t = normalizar_texto(titulo)
+        if t:
+            textos_slides.extend(segmentar_para_slides(t, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+    for p in selected_pars:
+        p = normalizar_texto(p)
+        if p:
+            textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+    return [t for t in textos_slides if t.strip()]
+
+
+# =========================
 # STREAMLIT UI
 # =========================
 st.set_page_config(page_title="Video + Voz", layout="wide")
@@ -584,10 +575,8 @@ with st.sidebar:
     model_id = st.selectbox("Modelo", ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"], index=0)
     output_format = st.selectbox("Formato", ["mp3_44100_128", "mp3_44100_192", "mp3_24000_48", "pcm_44100"], index=0)
 
-    voice_id_direct = st.text_input("Voice ID (opcional)", value="")
-    name_contains = st.text_input("Nombre de voz contiene (opcional)", value="")
-    gender = st.selectbox("Preferencia género (si labels)", ["", "female", "male", "neutral"], index=1)
-    language = st.selectbox("Preferencia idioma (si labels)", ["", "es", "spanish", "en", "english"], index=1)
+    # ✅ Voice ID por defecto
+    voice_id_direct = st.text_input("Voice ID", value=DEFAULT_VOICE_ID)
 
     st.subheader("Voice settings")
     stability = st.slider("stability", 0.0, 1.0, 0.45, 0.01)
@@ -611,8 +600,17 @@ modo = st.radio(
     horizontal=True
 )
 
-gen_audio = st.checkbox("Generar narración con ElevenLabs", value=True)
-max_imgs = st.slider("Máx imágenes a usar (si aplica)", 1, 50, 12)
+# ✅ Opción de salida (en ambos modos)
+output_mode = st.radio(
+    "¿Cómo quieres el video?",
+    ["Texto + Voz", "Solo Texto", "Solo Voz"],
+    horizontal=True
+)
+
+include_audio = output_mode in ("Texto + Voz", "Solo Voz")
+overlay_text = output_mode in ("Texto + Voz", "Solo Texto")
+
+max_imgs = st.slider("Máx imágenes a usar", 1, 50, 12)
 
 # Estados
 if "extracted" not in st.session_state:
@@ -644,12 +642,11 @@ if modo == "Desde URL de El Tiempo":
         st.divider()
         st.subheader("2) Selecciona y edita textos")
 
-        include_title = st.checkbox("Incluir título", value=True)
-        titulo_in = st.text_input("Título", value=data["titulo"])
+        include_title = st.checkbox("Incluir título", value=True, key="url_include_title")
+        titulo_in = st.text_input("Título", value=data["titulo"], key="url_title")
 
         st.write("Párrafos (marca los que quieres incluir):")
         selected_pars = []
-
         for i, p in enumerate(data["parrafos"]):
             col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment="top")
             with col_chk:
@@ -662,9 +659,10 @@ if modo == "Desde URL de El Tiempo":
         st.divider()
         st.subheader("3) Generar video")
 
-        if st.button("Generar video", type="primary"):
-            if gen_audio and not api_key:
-                st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
+        if st.button("Generar video", type="primary", key="url_generate"):
+            # Reglas mínimas
+            if include_audio and not api_key:
+                st.error("Falta API Key de ElevenLabs (ponla en Secrets o pégala en sidebar).")
                 st.stop()
 
             if include_title and not (titulo_in or "").strip():
@@ -675,35 +673,26 @@ if modo == "Desde URL de El Tiempo":
                 st.error("No hay textos seleccionados (ni título ni párrafos).")
                 st.stop()
 
-            work_dir = Path(tempfile.mkdtemp(prefix="nota_video_"))
+            work_dir = Path(tempfile.mkdtemp(prefix="url_video_"))
             imgs_dir = work_dir / "imgs"
             imgs_dir.mkdir(exist_ok=True)
 
             progress = st.progress(0, text="Iniciando...")
 
             try:
-                progress.progress(10, text="Preparando textos...")
-
+                progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_in) if include_title else "video"
 
-                # Slides SOLO con textos seleccionados
-                textos_slides = []
-                if include_title:
-                    t = normalizar_texto(titulo_in)
-                    textos_slides.extend(segmentar_para_slides(t, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
-                for p in selected_pars:
-                    textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
-
+                textos_slides = build_textos_slides(include_title, titulo_in, selected_pars)
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
-                # Narración = EXACTAMENTE lo que aparece en slides
+                # Narración = EXACTAMENTE lo que se seleccionó (representado en textos_slides)
                 texto_narracion = normalizar_texto(" ".join(textos_slides))
 
                 progress.progress(30, text="Descargando imágenes del artículo...")
                 downloaded_imgs = descargar_imagenes(data["img_urls"][:max_imgs], imgs_dir, max_workers=10)
 
-                # Extra uploads
                 if uploaded_extra:
                     downloaded_imgs.extend(guardar_imagenes_subidas(uploaded_extra, imgs_dir))
 
@@ -711,17 +700,12 @@ if modo == "Desde URL de El Tiempo":
                     raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
 
                 audio_path = None
-                if gen_audio:
-                    progress.progress(55, text="Listando voces...")
-                    voices = eleven_get_voices(api_key)
-                    voice_id, voice_obj = pick_voice(voices, name_contains, gender, language, voice_id_direct)
-                    st.info(f"Voz: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
-
-                    progress.progress(70, text="Generando narración...")
+                if include_audio:
+                    progress.progress(60, text="Generando narración (ElevenLabs)...")
                     audio_path = eleven_tts_long_to_mp3(
                         text=texto_narracion,
                         api_key=api_key,
-                        voice_id=voice_id,
+                        voice_id=(voice_id_direct or DEFAULT_VOICE_ID),
                         model_id=model_id,
                         output_format=output_format,
                         voice_settings=voice_settings,
@@ -730,7 +714,14 @@ if modo == "Desde URL de El Tiempo":
                     )
 
                 progress.progress(85, text="Renderizando video...")
-                out_video = crear_video(textos_slides, downloaded_imgs, titulo_final, audio_path, work_dir)
+                out_video = crear_video(
+                    textos_slides=textos_slides,
+                    imagenes=downloaded_imgs,
+                    titulo=titulo_final,
+                    audio_path=audio_path,
+                    work_dir=work_dir,
+                    overlay_text=overlay_text
+                )
 
                 progress.progress(100, text="Listo ✅")
                 st.success("Video creado.")
@@ -774,7 +765,7 @@ else:
         key="manual_text"
     )
 
-    if st.button("1) Cargar texto", type="primary"):
+    if st.button("1) Cargar texto", type="primary", key="manual_load_text"):
         pars = split_paragraphs_from_manual(texto_manual)
         st.session_state.manual_paragraphs = pars
         st.success(f"Texto cargado. Párrafos detectados: {len(pars)}")
@@ -797,6 +788,10 @@ else:
         st.subheader("3) Generar video")
 
         if st.button("Generar video", type="primary", key="manual_generate"):
+            if include_audio and not api_key:
+                st.error("Falta API Key de ElevenLabs (ponla en Secrets o pégala en sidebar).")
+                st.stop()
+
             if include_title_m and not (titulo_m or "").strip():
                 st.error("Marcaste 'Incluir título' pero el título está vacío.")
                 st.stop()
@@ -809,10 +804,6 @@ else:
                 st.error("En modo manual debes subir al menos 1 imagen.")
                 st.stop()
 
-            if gen_audio and not api_key:
-                st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
-                st.stop()
-
             work_dir = Path(tempfile.mkdtemp(prefix="manual_video_"))
             imgs_dir = work_dir / "imgs"
             imgs_dir.mkdir(exist_ok=True)
@@ -820,21 +811,14 @@ else:
             progress = st.progress(0, text="Iniciando...")
 
             try:
-                progress.progress(10, text="Preparando textos...")
-
+                progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_m) if include_title_m else "video"
 
-                textos_slides = []
-                if include_title_m:
-                    t = normalizar_texto(titulo_m)
-                    textos_slides.extend(segmentar_para_slides(t, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
-                for p in selected_pars:
-                    textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
-
+                textos_slides = build_textos_slides(include_title_m, titulo_m, selected_pars)
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
-                # Narración = EXACTAMENTE lo que aparece en slides
+                # Narración = EXACTAMENTE lo seleccionado
                 texto_narracion = normalizar_texto(" ".join(textos_slides))
 
                 progress.progress(30, text="Guardando imágenes subidas...")
@@ -843,17 +827,12 @@ else:
                     raise ValueError("No se pudieron procesar imágenes subidas.")
 
                 audio_path = None
-                if gen_audio:
-                    progress.progress(55, text="Listando voces...")
-                    voices = eleven_get_voices(api_key)
-                    voice_id, voice_obj = pick_voice(voices, name_contains, gender, language, voice_id_direct)
-                    st.info(f"Voz: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
-
-                    progress.progress(70, text="Generando narración...")
+                if include_audio:
+                    progress.progress(60, text="Generando narración (ElevenLabs)...")
                     audio_path = eleven_tts_long_to_mp3(
                         text=texto_narracion,
                         api_key=api_key,
-                        voice_id=voice_id,
+                        voice_id=(voice_id_direct or DEFAULT_VOICE_ID),
                         model_id=model_id,
                         output_format=output_format,
                         voice_settings=voice_settings,
@@ -862,7 +841,14 @@ else:
                     )
 
                 progress.progress(85, text="Renderizando video...")
-                out_video = crear_video(textos_slides, imgs_paths, titulo_final, audio_path, work_dir)
+                out_video = crear_video(
+                    textos_slides=textos_slides,
+                    imagenes=imgs_paths,
+                    titulo=titulo_final,
+                    audio_path=audio_path,
+                    work_dir=work_dir,
+                    overlay_text=overlay_text
+                )
 
                 progress.progress(100, text="Listo ✅")
                 st.success("Video creado.")
