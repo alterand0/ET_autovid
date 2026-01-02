@@ -168,6 +168,19 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
     flush()
     return [s for s in slides if s.strip()]
 
+def split_paragraphs_from_manual(text: str) -> list[str]:
+    """
+    Divide en párrafos usando líneas en blanco como separador.
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+    # normaliza saltos
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", t) if p.strip()]
+    # filtra basura muy corta
+    return [p for p in parts if len(normalizar_texto(p)) >= 10]
+
 
 # =========================
 # FONT
@@ -283,9 +296,24 @@ def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) ->
                 paths.append(p)
     return paths
 
+def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for uf in (uploaded_files or []):
+        try:
+            img = Image.open(BytesIO(uf.read()))
+            img = ajustar_imagen(img).convert("RGB")
+            safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", uf.name)
+            pth = out_dir / f"upload_{safe_name}"
+            img.save(pth, quality=92)
+            paths.append(pth)
+        except Exception:
+            continue
+    return paths
+
 def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = 65) -> list[Path]:
     """
-    - Máx 30 chars por línea (wrap_width=30)
+    - Máx 30 chars por línea
     - Máx 2 líneas por imagen (si hay más, crea más imágenes)
     - No corta palabras
     - Sin barra azul: texto blanco con borde negro
@@ -305,7 +333,6 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
 
     fuente = load_font(font_size)
 
-    # 30 chars/line, sin cortar palabras
     lineas = textwrap.wrap(
         re.sub(r"\s+", " ", texto).strip(),
         width=RENDER_WRAP_WIDTH,
@@ -384,17 +411,14 @@ def pick_voice(voices: list[dict], name_contains: str, gender: str, language: st
 
         if name_contains_n:
             s += 50 if name_contains_n in name else -10
-
         if gender_n:
             g = labels_n.get("gender", "")
             if g:
                 s += 15 if gender_n in g else -5
-
         if lang_n:
             l = labels_n.get("language", "")
             if l:
                 s += 10 if (lang_n in l or l in lang_n) else -3
-
         return s
 
     best = sorted(voices, key=score, reverse=True)[0]
@@ -545,10 +569,10 @@ def crear_video(textos_slides: list[str], imagenes: list[Path], titulo: str, aud
 # =========================
 # STREAMLIT UI
 # =========================
-st.set_page_config(page_title="Nota → Video + Voz", layout="wide")
-st.title("Nota de El Tiempo → Video con narración (ElevenLabs)")
+st.set_page_config(page_title="Video + Voz", layout="wide")
+st.title("Generador de Video con Narración (ElevenLabs)")
 
-# PIN gate
+# PIN gate primero
 require_pin_if_configured()
 
 with st.sidebar:
@@ -580,146 +604,278 @@ voice_settings = {
     "speed": speed,
 }
 
-st.caption("Modo avanzado (selección por marcación).")
+st.divider()
+modo = st.radio(
+    "¿Cómo quieres ingresar el contenido?",
+    ["Desde URL de El Tiempo", "Texto e imágenes manual"],
+    horizontal=True
+)
 
-url = st.text_input("URL del artículo", placeholder="https://www.eltiempo.com/...")
-uploaded = st.file_uploader("Sube imágenes extra (opcional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+gen_audio = st.checkbox("Generar narración con ElevenLabs", value=True)
+max_imgs = st.slider("Máx imágenes a usar (si aplica)", 1, 50, 12)
 
-c1, c2 = st.columns(2)
-with c1:
-    max_imgs = st.slider("Máx imágenes del artículo", 1, 30, 12)
-with c2:
-    gen_audio = st.checkbox("Generar narración con ElevenLabs", value=True)
-
+# Estados
 if "extracted" not in st.session_state:
     st.session_state.extracted = None
+if "manual_paragraphs" not in st.session_state:
+    st.session_state.manual_paragraphs = []
 
-if st.button("1) Extraer contenido", type="primary", disabled=not bool(url)):
-    try:
-        with st.spinner("Extrayendo..."):
-            titulo, parrafos, img_urls = extraer_contenido_articulo(url)
-        st.session_state.extracted = {"titulo": titulo, "parrafos": parrafos, "img_urls": img_urls}
-        st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes: {len(img_urls)}")
-    except Exception as e:
-        st.session_state.extracted = None
-        st.error(f"No pude extraer: {e}")
 
-data = st.session_state.extracted
+# =========================
+# MODO URL
+# =========================
+if modo == "Desde URL de El Tiempo":
+    url = st.text_input("URL del artículo", placeholder="https://www.eltiempo.com/...")
+    uploaded_extra = st.file_uploader("Sube imágenes extra (opcional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-if data:
-    st.divider()
-    st.subheader("2) Selecciona y edita textos (sin desplegables)")
+    if st.button("1) Extraer contenido", type="primary", disabled=not bool(url)):
+        try:
+            with st.spinner("Extrayendo..."):
+                titulo, parrafos, img_urls = extraer_contenido_articulo(url)
+            st.session_state.extracted = {"titulo": titulo, "parrafos": parrafos, "img_urls": img_urls}
+            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes: {len(img_urls)}")
+        except Exception as e:
+            st.session_state.extracted = None
+            st.error(f"No pude extraer: {e}")
 
-    include_title = st.checkbox("Incluir título", value=True)
-    titulo_in = st.text_input("Título", value=data["titulo"])
+    data = st.session_state.extracted
 
-    st.write("Párrafos (marca los que quieres incluir):")
-    selected_pars = []
+    if data:
+        st.divider()
+        st.subheader("2) Selecciona y edita textos")
 
-    for i, p in enumerate(data["parrafos"]):
-        col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment="top")
-        with col_chk:
-            ck = st.checkbox("Usar", value=True, key=f"par_ck_{i}")
-        with col_txt:
-            txt = st.text_area(label=f"Párrafo {i+1}", value=p, height=90, key=f"par_txt_{i}")
-        if ck:
-            selected_pars.append(txt)
+        include_title = st.checkbox("Incluir título", value=True)
+        titulo_in = st.text_input("Título", value=data["titulo"])
 
-    st.divider()
-    st.subheader("3) Generar video")
+        st.write("Párrafos (marca los que quieres incluir):")
+        selected_pars = []
 
-    if st.button("Generar video", type="primary"):
-        if gen_audio and not api_key:
-            st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
-            st.stop()
+        for i, p in enumerate(data["parrafos"]):
+            col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment="top")
+            with col_chk:
+                ck = st.checkbox("Usar", value=True, key=f"url_par_ck_{i}")
+            with col_txt:
+                txt = st.text_area(label=f"Párrafo {i+1}", value=p, height=90, key=f"url_par_txt_{i}")
+            if ck:
+                selected_pars.append(txt)
 
-        if include_title:
-            if not (titulo_in or "").strip():
+        st.divider()
+        st.subheader("3) Generar video")
+
+        if st.button("Generar video", type="primary"):
+            if gen_audio and not api_key:
+                st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
+                st.stop()
+
+            if include_title and not (titulo_in or "").strip():
                 st.error("Marcaste 'Incluir título' pero el título está vacío.")
                 st.stop()
 
-        if not selected_pars and not include_title:
-            st.error("No hay textos seleccionados (ni título ni párrafos).")
-            st.stop()
+            if not selected_pars and not include_title:
+                st.error("No hay textos seleccionados (ni título ni párrafos).")
+                st.stop()
 
-        work_dir = Path(tempfile.mkdtemp(prefix="nota_video_"))
-        imgs_dir = work_dir / "imgs"
-        imgs_dir.mkdir(exist_ok=True)
+            work_dir = Path(tempfile.mkdtemp(prefix="nota_video_"))
+            imgs_dir = work_dir / "imgs"
+            imgs_dir.mkdir(exist_ok=True)
 
-        progress = st.progress(0, text="Iniciando...")
+            progress = st.progress(0, text="Iniciando...")
 
-        try:
-            progress.progress(10, text="Preparando textos...")
-
-            titulo_final = normalizar_texto(titulo_in) if include_title else "video"
-
-            # ✅ Construimos los slides SOLO con textos seleccionados
-            textos_slides = []
-            if include_title:
-                t = normalizar_texto(titulo_in)
-                textos_slides.extend(
-                    segmentar_para_slides(t, max_chars=SLIDE_TEXT_MAX_CHARS, max_sentences=SLIDE_TEXT_MAX_SENTENCES)
-                )
-
-            for p in selected_pars:
-                textos_slides.extend(
-                    segmentar_para_slides(p, max_chars=SLIDE_TEXT_MAX_CHARS, max_sentences=SLIDE_TEXT_MAX_SENTENCES)
-                )
-
-            if not textos_slides:
-                raise ValueError("No quedaron textos para slides tras segmentar.")
-
-            # ✅ Narración = EXACTAMENTE lo que aparece en los slides (si quitas párrafos, NO se narran)
-            texto_narracion = normalizar_texto(" ".join(textos_slides))
-
-            progress.progress(30, text="Descargando imágenes...")
-            downloaded_imgs = descargar_imagenes(data["img_urls"][:max_imgs], imgs_dir, max_workers=10)
-
-            if uploaded:
-                for uf in uploaded:
-                    img = Image.open(BytesIO(uf.read()))
-                    img = ajustar_imagen(img).convert("RGB")
-                    pth = imgs_dir / f"upload_{uf.name}"
-                    img.save(pth, quality=92)
-                    downloaded_imgs.append(pth)
-
-            if not downloaded_imgs:
-                raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
-
-            audio_path = None
-            if gen_audio:
-                progress.progress(55, text="Listando voces...")
-                voices = eleven_get_voices(api_key)
-                voice_id, voice_obj = pick_voice(voices, name_contains, gender, language, voice_id_direct)
-                st.info(f"Voz: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
-
-                progress.progress(70, text="Generando narración...")
-                audio_path = eleven_tts_long_to_mp3(
-                    text=texto_narracion,
-                    api_key=api_key,
-                    voice_id=voice_id,
-                    model_id=model_id,
-                    output_format=output_format,
-                    voice_settings=voice_settings,
-                    out_mp3=work_dir / "narracion.mp3",
-                    work_dir=work_dir,
-                )
-
-            progress.progress(85, text="Renderizando video...")
-            out_video = crear_video(textos_slides, downloaded_imgs, titulo_final, audio_path, work_dir)
-
-            progress.progress(100, text="Listo ✅")
-            st.success("Video creado.")
-            video_bytes = out_video.read_bytes()
-            st.video(video_bytes)
-            st.download_button("Descargar MP4", data=video_bytes, file_name=out_video.name, mime="video/mp4")
-
-        except Exception as e:
-            st.error(f"Error: {e}")
-        finally:
             try:
-                shutil.rmtree(work_dir, ignore_errors=True)
-            except:
-                pass
+                progress.progress(10, text="Preparando textos...")
+
+                titulo_final = normalizar_texto(titulo_in) if include_title else "video"
+
+                # Slides SOLO con textos seleccionados
+                textos_slides = []
+                if include_title:
+                    t = normalizar_texto(titulo_in)
+                    textos_slides.extend(segmentar_para_slides(t, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+                for p in selected_pars:
+                    textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+
+                if not textos_slides:
+                    raise ValueError("No quedaron textos para slides tras segmentar.")
+
+                # Narración = EXACTAMENTE lo que aparece en slides
+                texto_narracion = normalizar_texto(" ".join(textos_slides))
+
+                progress.progress(30, text="Descargando imágenes del artículo...")
+                downloaded_imgs = descargar_imagenes(data["img_urls"][:max_imgs], imgs_dir, max_workers=10)
+
+                # Extra uploads
+                if uploaded_extra:
+                    downloaded_imgs.extend(guardar_imagenes_subidas(uploaded_extra, imgs_dir))
+
+                if not downloaded_imgs:
+                    raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
+
+                audio_path = None
+                if gen_audio:
+                    progress.progress(55, text="Listando voces...")
+                    voices = eleven_get_voices(api_key)
+                    voice_id, voice_obj = pick_voice(voices, name_contains, gender, language, voice_id_direct)
+                    st.info(f"Voz: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
+
+                    progress.progress(70, text="Generando narración...")
+                    audio_path = eleven_tts_long_to_mp3(
+                        text=texto_narracion,
+                        api_key=api_key,
+                        voice_id=voice_id,
+                        model_id=model_id,
+                        output_format=output_format,
+                        voice_settings=voice_settings,
+                        out_mp3=work_dir / "narracion.mp3",
+                        work_dir=work_dir,
+                    )
+
+                progress.progress(85, text="Renderizando video...")
+                out_video = crear_video(textos_slides, downloaded_imgs, titulo_final, audio_path, work_dir)
+
+                progress.progress(100, text="Listo ✅")
+                st.success("Video creado.")
+                video_bytes = out_video.read_bytes()
+                st.video(video_bytes)
+                st.download_button("Descargar MP4", data=video_bytes, file_name=out_video.name, mime="video/mp4")
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                try:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                except:
+                    pass
+    else:
+        st.info("Pega una URL y presiona **Extraer contenido** para empezar.")
+
+
+# =========================
+# MODO MANUAL
+# =========================
 else:
-    st.info("Pega una URL y presiona **Extraer contenido** para empezar.")
+    st.subheader("Texto e imágenes manual")
+
+    colL, colR = st.columns([1, 1])
+    with colL:
+        include_title_m = st.checkbox("Incluir título", value=True, key="manual_include_title")
+        titulo_m = st.text_input("Título", value="", key="manual_title")
+
+    with colR:
+        uploaded_manual_imgs = st.file_uploader(
+            "Sube imágenes (obligatorio)",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key="manual_imgs"
+        )
+
+    texto_manual = st.text_area(
+        "Pega aquí el texto completo (se separa por párrafos usando líneas en blanco)",
+        height=220,
+        key="manual_text"
+    )
+
+    if st.button("1) Cargar texto", type="primary"):
+        pars = split_paragraphs_from_manual(texto_manual)
+        st.session_state.manual_paragraphs = pars
+        st.success(f"Texto cargado. Párrafos detectados: {len(pars)}")
+
+    if st.session_state.manual_paragraphs:
+        st.divider()
+        st.subheader("2) Selecciona y edita textos")
+
+        selected_pars = []
+        for i, p in enumerate(st.session_state.manual_paragraphs):
+            col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment="top")
+            with col_chk:
+                ck = st.checkbox("Usar", value=True, key=f"manual_par_ck_{i}")
+            with col_txt:
+                txt = st.text_area(label=f"Párrafo {i+1}", value=p, height=90, key=f"manual_par_txt_{i}")
+            if ck:
+                selected_pars.append(txt)
+
+        st.divider()
+        st.subheader("3) Generar video")
+
+        if st.button("Generar video", type="primary", key="manual_generate"):
+            if include_title_m and not (titulo_m or "").strip():
+                st.error("Marcaste 'Incluir título' pero el título está vacío.")
+                st.stop()
+
+            if not selected_pars and not include_title_m:
+                st.error("No hay textos seleccionados (ni título ni párrafos).")
+                st.stop()
+
+            if not uploaded_manual_imgs:
+                st.error("En modo manual debes subir al menos 1 imagen.")
+                st.stop()
+
+            if gen_audio and not api_key:
+                st.error("Falta API Key (ponla en Secrets o pégala en sidebar).")
+                st.stop()
+
+            work_dir = Path(tempfile.mkdtemp(prefix="manual_video_"))
+            imgs_dir = work_dir / "imgs"
+            imgs_dir.mkdir(exist_ok=True)
+
+            progress = st.progress(0, text="Iniciando...")
+
+            try:
+                progress.progress(10, text="Preparando textos...")
+
+                titulo_final = normalizar_texto(titulo_m) if include_title_m else "video"
+
+                textos_slides = []
+                if include_title_m:
+                    t = normalizar_texto(titulo_m)
+                    textos_slides.extend(segmentar_para_slides(t, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+                for p in selected_pars:
+                    textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+
+                if not textos_slides:
+                    raise ValueError("No quedaron textos para slides tras segmentar.")
+
+                # Narración = EXACTAMENTE lo que aparece en slides
+                texto_narracion = normalizar_texto(" ".join(textos_slides))
+
+                progress.progress(30, text="Guardando imágenes subidas...")
+                imgs_paths = guardar_imagenes_subidas(uploaded_manual_imgs[:max_imgs], imgs_dir)
+                if not imgs_paths:
+                    raise ValueError("No se pudieron procesar imágenes subidas.")
+
+                audio_path = None
+                if gen_audio:
+                    progress.progress(55, text="Listando voces...")
+                    voices = eleven_get_voices(api_key)
+                    voice_id, voice_obj = pick_voice(voices, name_contains, gender, language, voice_id_direct)
+                    st.info(f"Voz: {voice_obj.get('name')} | labels={voice_obj.get('labels')}")
+
+                    progress.progress(70, text="Generando narración...")
+                    audio_path = eleven_tts_long_to_mp3(
+                        text=texto_narracion,
+                        api_key=api_key,
+                        voice_id=voice_id,
+                        model_id=model_id,
+                        output_format=output_format,
+                        voice_settings=voice_settings,
+                        out_mp3=work_dir / "narracion.mp3",
+                        work_dir=work_dir,
+                    )
+
+                progress.progress(85, text="Renderizando video...")
+                out_video = crear_video(textos_slides, imgs_paths, titulo_final, audio_path, work_dir)
+
+                progress.progress(100, text="Listo ✅")
+                st.success("Video creado.")
+                video_bytes = out_video.read_bytes()
+                st.video(video_bytes)
+                st.download_button("Descargar MP4", data=video_bytes, file_name=out_video.name, mime="video/mp4")
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                try:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                except:
+                    pass
+    else:
+        st.info("Pega texto y presiona **Cargar texto** para generar los párrafos seleccionables.")
