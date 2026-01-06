@@ -13,6 +13,12 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
+# --- FIX Pillow>=10 (MoviePy usa Image.ANTIALIAS) ---
+if not hasattr(Image, "ANTIALIAS"):
+    try:
+        Image.ANTIALIAS = Image.Resampling.LANCZOS  # Pillow>=10
+    except Exception:
+        Image.ANTIALIAS = Image.LANCZOS
 
 from moviepy.editor import (
     ImageClip,
