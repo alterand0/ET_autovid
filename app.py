@@ -20,13 +20,7 @@ if not hasattr(Image, "ANTIALIAS"):
     except Exception:
         Image.ANTIALIAS = Image.LANCZOS
 
-from moviepy.editor import (
-    ImageClip,
-    VideoFileClip,
-    concatenate_videoclips,
-    AudioFileClip,
-    CompositeAudioClip,
-)
+from moviepy.editor import ( ImageClip, VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip )
 from moviepy.audio.fx.all import audio_loop, audio_fadein, audio_fadeout, volumex
 import imageio_ffmpeg
 
