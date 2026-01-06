@@ -570,7 +570,7 @@ with st.sidebar:
     st.header("ElevenLabs")
     secret_key = st.secrets.get("ELEVENLABS_API_KEY", "")
     api_key = secret_key or st.text_input("API Key (si no está en Secrets)", type="password")
-    st.caption("Recomendado: configúrala en Secrets.")
+    st.caption("Configuración de modelo de voz.")
 
     model_id = st.selectbox("Modelo", ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"], index=0)
     output_format = st.selectbox("Formato", ["mp3_44100_128", "mp3_44100_192", "mp3_24000_48", "pcm_44100", "pcm_16000", "ulaw_8000"], index=0)
