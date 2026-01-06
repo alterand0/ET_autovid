@@ -47,7 +47,7 @@ RENDER_WRAP_WIDTH = 30
 RENDER_LINES_PER_IMAGE = 2
 
 # ✅ Tamaño de fuente
-FONT_SIZE = 50
+FONT_SIZE = 40
 
 # ✅ Voice ID por defecto (lo pediste fijo)
 DEFAULT_VOICE_ID = "4XUsiqPDK4UACIM2BILe"
