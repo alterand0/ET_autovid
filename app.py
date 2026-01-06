@@ -710,7 +710,15 @@ def crear_video(
     final = concatenate_videoclips(final_clips, method="compose")
 
     out = work_dir / f"{safe_filename(titulo)}.mp4"
-    final.write_videofile(str(out), fps=FPS, audio_codec="aac")
+    final.write_videofile(
+            str(out_path),
+            fps=fps,                  # baja esto a 15 por defecto en Streamlit
+            codec="libx264",
+            audio_codec="aac",
+            preset="ultrafast",       # o "veryfast"
+            threads=2,                # 2 suele ser más estable en Cloud
+            ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        )
 
     # cleanup
     try:
