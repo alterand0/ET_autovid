@@ -14,7 +14,13 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 
-from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip
+from moviepy.editor import (
+    ImageClip,
+    concatenate_videoclips,
+    AudioFileClip,
+    CompositeAudioClip,
+)
+from moviepy.audio.fx.all import audio_loop, audio_fadein, audio_fadeout, volumex
 import imageio_ffmpeg
 
 
@@ -33,8 +39,9 @@ HEADERS_FAKE = {
 
 RES_W, RES_H = 1920, 1080
 FPS = 24
+
 DEFAULT_SLIDE_DURATION = 7.0
-MIN_SLIDE_DURATION_WITH_AUDIO = 3.5
+MIN_SLIDE_DURATION_WITH_VOICE = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
 
@@ -47,9 +54,9 @@ RENDER_WRAP_WIDTH = 30
 RENDER_LINES_PER_IMAGE = 2
 
 # ✅ Tamaño de fuente
-FONT_SIZE = 40
+FONT_SIZE = 50
 
-# ✅ Voice ID por defecto (lo pediste fijo)
+# ✅ Voice ID por defecto
 DEFAULT_VOICE_ID = "4XUsiqPDK4UACIM2BILe"
 
 
@@ -83,17 +90,41 @@ def require_pin_if_configured():
 # =========================
 # TEXT NORMALIZATION + SEGMENTATION
 # =========================
-QUOTES_MAP = str.maketrans({
-    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
-    "‘": "'", "’": "'", "‚": "'", "´": "'",
-    "…": "...",
-    "\u00A0": " ",
-})
+QUOTES_MAP = str.maketrans(
+    {
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "«": '"',
+        "»": '"',
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "´": "'",
+        "…": "...",
+        "\u00A0": " ",
+    }
+)
 
 ABREVIATURAS = [
-    "Sr.", "Sra.", "Dr.", "Dra.", "Ing.", "Lic.", "No.", "Nro.", "Art.", "Pág.",
-    "p. ej.", "p.ej.", "etc.", "EE. UU.", "U.S.", "vs."
+    "Sr.",
+    "Sra.",
+    "Dr.",
+    "Dra.",
+    "Ing.",
+    "Lic.",
+    "No.",
+    "Nro.",
+    "Art.",
+    "Pág.",
+    "p. ej.",
+    "p.ej.",
+    "etc.",
+    "EE. UU.",
+    "U.S.",
+    "vs.",
 ]
+
 
 def normalizar_texto(texto: str) -> str:
     if not texto:
@@ -102,6 +133,7 @@ def normalizar_texto(texto: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"\s+([,.;:!?])", r"\1", t)
     return t
+
 
 def dividir_en_frases(texto: str) -> list[str]:
     t = normalizar_texto(texto)
@@ -125,10 +157,8 @@ def dividir_en_frases(texto: str) -> list[str]:
             frases.append(p)
     return frases
 
+
 def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> list[str]:
-    """
-    Segmenta en bloques cortos (sin cortar palabras).
-    """
     frases = dividir_en_frases(texto)
     if not frases:
         t = normalizar_texto(texto)
@@ -177,10 +207,8 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
     flush()
     return [s for s in slides if s.strip()]
 
+
 def split_paragraphs_from_manual(text: str) -> list[str]:
-    """
-    Divide en párrafos por líneas en blanco.
-    """
     t = (text or "").strip()
     if not t:
         return []
@@ -255,7 +283,10 @@ def extraer_contenido_articulo(url: str) -> tuple[str, list[str], list[str]]:
     if apertura:
         agregar_img(apertura.find("img"))
 
-    for media in cuerpo.find_all(["figure", "div"], class_=["c-cuerpo__media__thumb", "c-cuerpo__media", "c-detail__media"]):
+    for media in cuerpo.find_all(
+        ["figure", "div"],
+        class_=["c-cuerpo__media__thumb", "c-cuerpo__media", "c-detail__media"],
+    ):
         for img in media.find_all("img"):
             agregar_img(img)
         zoom = media.find("div", class_="c-cuerpo__media__thumb__zoom")
@@ -277,6 +308,7 @@ def ajustar_imagen(imagen: Image.Image) -> Image.Image:
     relacion = imagen.width / max(1, imagen.height)
     nueva_w = int(RES_H * relacion)
     return imagen.resize((nueva_w, RES_H), Image.LANCZOS)
+
 
 def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +335,7 @@ def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) ->
                 paths.append(p)
     return paths
 
+
 def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
@@ -317,6 +350,7 @@ def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
         except Exception:
             continue
     return paths
+
 
 def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:
     """
@@ -344,10 +378,10 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
         re.sub(r"\s+", " ", texto).strip(),
         width=RENDER_WRAP_WIDTH,
         break_long_words=False,
-        break_on_hyphens=False
+        break_on_hyphens=False,
     )
 
-    bloques = [lineas[i:i+RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]
+    bloques = [lineas[i : i + RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]
     outs = []
 
     for j, bloque in enumerate(bloques):
@@ -375,7 +409,7 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
                 font=fuente,
                 fill="#ffffff",
                 stroke_width=3,
-                stroke_fill="#000000"
+                stroke_fill="#000000",
             )
             y += h + 10
 
@@ -387,7 +421,7 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
 
 
 # =========================
-# ElevenLabs: long TTS
+# ElevenLabs: long TTS (MP3)
 # =========================
 def model_char_limit(model_id: str) -> int:
     if model_id == "eleven_multilingual_v2":
@@ -397,6 +431,7 @@ def model_char_limit(model_id: str) -> int:
     if model_id == "eleven_v3":
         return 4800
     return 4500
+
 
 def split_text_chunks(text: str, max_chars: int) -> list[str]:
     text = re.sub(r"\s+", " ", (text or "")).strip()
@@ -434,11 +469,21 @@ def split_text_chunks(text: str, max_chars: int) -> list[str]:
         chunks.append(cur)
     return chunks
 
+
 def ffmpeg_exe() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
-def eleven_tts_long_to_mp3(text: str, api_key: str, voice_id: str, model_id: str,
-                           output_format: str, voice_settings: dict, out_mp3: Path, work_dir: Path) -> Path:
+
+def eleven_tts_long_to_mp3(
+    text: str,
+    api_key: str,
+    voice_id: str,
+    model_id: str,
+    output_format: str,
+    voice_settings: dict,
+    out_mp3: Path,
+    work_dir: Path,
+) -> Path:
     max_chars = model_char_limit(model_id)
     chunks = split_text_chunks(text, max_chars=max_chars)
     if not chunks:
@@ -454,12 +499,19 @@ def eleven_tts_long_to_mp3(text: str, api_key: str, voice_id: str, model_id: str
         payload = {"text": chunk, "model_id": model_id, "voice_settings": voice_settings}
 
         r = requests.post(
-            url, params=params,
+            url,
+            params=params,
             headers={"xi-api-key": api_key, "Content-Type": "application/json"},
             data=json.dumps(payload),
-            timeout=120
+            timeout=120,
         )
-        r.raise_for_status()
+
+        if r.status_code >= 400:
+            try:
+                detail = r.json()
+            except Exception:
+                detail = r.text[:400]
+            raise RuntimeError(f"ElevenLabs error {r.status_code}: {detail}")
 
         p = parts_dir / f"part_{i:04d}.mp3"
         p.write_bytes(r.content)
@@ -471,17 +523,83 @@ def eleven_tts_long_to_mp3(text: str, api_key: str, voice_id: str, model_id: str
             f.write(f"file '{p.resolve().as_posix()}'\n")
 
     out_mp3 = out_mp3.resolve()
+
+    # concat (copy)
     cmd = [ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(out_mp3)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     if proc.returncode != 0:
-        cmd2 = [ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-                "-c:a", "libmp3lame", "-b:a", "128k", str(out_mp3)]
+        # fallback re-encode
+        cmd2 = [
+            ffmpeg_exe(),
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            str(out_mp3),
+        ]
         proc2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if proc2.returncode != 0:
             raise RuntimeError("ffmpeg falló concatenando audio:\n" + (proc2.stderr[-1500:] or proc.stderr[-1500:]))
 
     return out_mp3
+
+
+# =========================
+# AUDIO: build final audio clip (voice/music)
+# =========================
+def build_final_audio_clip(
+    voice_path: Path | None,
+    music_path: Path | None,
+    target_duration: float,
+    voice_volume: float,
+    music_volume: float,
+    fade_sec: float,
+) -> AudioFileClip | CompositeAudioClip | None:
+    """
+    Devuelve un clip de audio listo para set_audio().
+    - Si hay voz y música: mezcla con música loopeada a la duración de la voz.
+    - Si solo hay música: música loopeada a target_duration.
+    - Si solo voz: voz.
+    """
+    if not voice_path and not music_path:
+        return None
+
+    fade = min(max(0.0, fade_sec), max(0.0, target_duration / 4.0))
+
+    voice_clip = None
+    if voice_path and voice_path.exists():
+        voice_clip = AudioFileClip(str(voice_path))
+        voice_clip = volumex(voice_clip, voice_volume)
+
+    music_clip = None
+    if music_path and music_path.exists():
+        music_clip = AudioFileClip(str(music_path))
+        # loop a la duración objetivo
+        music_clip = audio_loop(music_clip, duration=target_duration)
+        music_clip = volumex(music_clip, music_volume)
+        if fade > 0:
+            music_clip = audio_fadein(music_clip, fade)
+            music_clip = audio_fadeout(music_clip, fade)
+
+    if voice_clip and music_clip:
+        mixed = CompositeAudioClip([music_clip, voice_clip]).set_duration(target_duration)
+        return mixed
+
+    if voice_clip:
+        return voice_clip
+
+    if music_clip:
+        return music_clip
+
+    return None
 
 
 # =========================
@@ -492,60 +610,88 @@ def safe_filename(title: str, max_len: int = 60) -> str:
     s = s[:max_len].strip()
     return s or "video"
 
+
 def crear_video(
     textos_slides: list[str],
     imagenes: list[Path],
     titulo: str,
-    audio_path: Path | None,
+    overlay_text: bool,
+    voice_path: Path | None,
+    music_path: Path | None,
+    voice_volume: float,
+    music_volume: float,
+    music_fade: float,
+    base_slide_duration: float,
     work_dir: Path,
-    overlay_text: bool
 ) -> Path:
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
 
-    # Genera imágenes (con o sin texto)
-    slide_imgs = []
+    # 1) Render slides
+    slide_imgs: list[Path] = []
     for idx, txt in enumerate(textos_slides):
         img_path = imagenes[idx % len(imagenes)]
         slide_imgs.extend(render_slide(img_path, txt if overlay_text else "", idx, slides_dir, font_size=FONT_SIZE))
 
-    # Duración por slide
-    audio_clip = None
-    if audio_path and audio_path.exists():
-        audio_clip = AudioFileClip(str(audio_path))
-        total = max(1.0, float(audio_clip.duration))
-        dur = max(MIN_SLIDE_DURATION_WITH_AUDIO, total / max(1, len(slide_imgs)))
-    else:
-        dur = DEFAULT_SLIDE_DURATION
+    if not slide_imgs:
+        raise ValueError("No se generaron slides (slide_imgs vacío).")
 
-    clips = [ImageClip(str(p)).set_duration(dur) for p in slide_imgs]
+    # 2) Decide duración por slide
+    voice_duration = None
+    if voice_path and voice_path.exists():
+        try:
+            voice_duration = float(AudioFileClip(str(voice_path)).duration)
+        except Exception:
+            voice_duration = None
+
+    if voice_duration and voice_duration > 0:
+        per_slide = max(MIN_SLIDE_DURATION_WITH_VOICE, voice_duration / len(slide_imgs))
+        video_duration = voice_duration  # el video se sincroniza a la voz
+    else:
+        per_slide = float(base_slide_duration)
+        video_duration = per_slide * len(slide_imgs)
+
+    clips = [ImageClip(str(p)).set_duration(per_slide) for p in slide_imgs]
     final = concatenate_videoclips(clips, method="compose")
 
-    # Audio
+    # 3) Audio final: voz y/o música
+    target_audio_duration = float(voice_duration) if voice_duration and voice_duration > 0 else float(video_duration)
+    audio_clip = build_final_audio_clip(
+        voice_path=voice_path if (voice_path and voice_path.exists()) else None,
+        music_path=music_path if (music_path and music_path.exists()) else None,
+        target_duration=target_audio_duration,
+        voice_volume=voice_volume,
+        music_volume=music_volume,
+        fade_sec=music_fade,
+    )
+
     if audio_clip:
-        final = final.set_audio(audio_clip).set_duration(audio_clip.duration)
+        final = final.set_audio(audio_clip)
+        final = final.set_duration(target_audio_duration)
+    else:
+        final = final.set_duration(video_duration)
 
     out = work_dir / f"{safe_filename(titulo)}.mp4"
     final.write_videofile(str(out), fps=FPS, audio_codec="aac")
 
     try:
         final.close()
-    except:
+    except Exception:
         pass
     try:
         if audio_clip:
             audio_clip.close()
-    except:
+    except Exception:
         pass
 
     return out
 
 
 # =========================
-# HELPERS: build slides from selection
+# HELPERS
 # =========================
 def build_textos_slides(include_title: bool, titulo: str, selected_pars: list[str]) -> list[str]:
-    textos_slides = []
+    textos_slides: list[str] = []
     if include_title:
         t = normalizar_texto(titulo)
         if t:
@@ -557,25 +703,48 @@ def build_textos_slides(include_title: bool, titulo: str, selected_pars: list[st
     return [t for t in textos_slides if t.strip()]
 
 
+def save_uploaded_audio(uploaded_file, out_dir: Path) -> Path | None:
+    if not uploaded_file:
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", uploaded_file.name)
+    p = out_dir / f"bgm_{safe_name}"
+    p.write_bytes(uploaded_file.getvalue())
+    return p
+
+
 # =========================
 # STREAMLIT UI
 # =========================
 st.set_page_config(page_title="Video + Voz", layout="wide")
 st.title("Generador de Video con Narración (ElevenLabs)")
 
-# PIN gate primero
+# PIN gate
 require_pin_if_configured()
 
 with st.sidebar:
     st.header("ElevenLabs")
+
     secret_key = st.secrets.get("ELEVENLABS_API_KEY", "")
-    api_key = secret_key or st.text_input("API Key (si no está en Secrets)", type="password")
-    st.caption("Configuración de modelo de voz.")
+    use_secrets = st.checkbox("Usar API Key de Secrets", value=bool(secret_key))
+    if use_secrets and secret_key:
+        api_key = secret_key
+        st.caption("Usando API Key desde Secrets.")
+    else:
+        api_key = st.text_input("API Key", type="password")
 
-    model_id = st.selectbox("Modelo", ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"], index=0)
-    output_format = st.selectbox("Formato", ["mp3_44100_128", "mp3_44100_192", "mp3_24000_48", "pcm_44100", "pcm_16000", "ulaw_8000"], index=0)
+    # Mantengo MP3 (calidad y compatibilidad)
+    model_id = st.selectbox(
+        "Modelo",
+        ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"],
+        index=0,
+    )
+    output_format = st.selectbox(
+        "Formato (MP3)",
+        ["mp3_44100_128", "mp3_44100_192"],
+        index=0,
+    )
 
-    # ✅ Voice ID por defecto
     voice_id_direct = st.text_input("Voice ID", value=DEFAULT_VOICE_ID)
 
     st.subheader("Voice settings")
@@ -594,22 +763,48 @@ voice_settings = {
 }
 
 st.divider()
+
 modo = st.radio(
     "¿Cómo quieres ingresar el contenido?",
     ["Desde URL de El Tiempo", "Texto e imágenes manual"],
-    horizontal=True
+    horizontal=True,
 )
 
-# ✅ Opción de salida (en ambos modos)
+# ✅ Salidas (incluye Solo Texto + Música)
 output_mode = st.radio(
     "¿Cómo quieres el video?",
-    ["Texto + Voz", "Solo Texto", "Solo Voz"],
-    horizontal=True
+    ["Texto + Voz", "Solo Texto", "Solo Voz", "Solo Texto + Música"],
+    horizontal=True,
 )
 
-include_audio = output_mode in ("Texto + Voz", "Solo Voz")
-overlay_text = output_mode in ("Texto + Voz", "Solo Texto")
+want_voice = output_mode in ("Texto + Voz", "Solo Voz")
+want_text = output_mode in ("Texto + Voz", "Solo Texto", "Solo Texto + Música")
+want_music_required = output_mode == "Solo Texto + Música"
 
+overlay_text = want_text
+
+# Música (para cualquier modo)
+st.subheader("Música (Audio Network) - opcional o requerida según modo")
+bgm_file = st.file_uploader(
+    "Sube música de fondo (MP3/WAV)",
+    type=["mp3", "wav"],
+    accept_multiple_files=False,
+    key="bgm_upload",
+)
+
+use_bgm = False
+if want_music_required:
+    use_bgm = True
+    st.info("En **Solo Texto + Música**, la música es obligatoria.")
+else:
+    if bgm_file is not None:
+        use_bgm = st.checkbox("Usar esta música como fondo", value=False, key="use_bgm_checkbox")
+
+music_volume = st.slider("Volumen música", 0.0, 1.0, 0.18, 0.01)
+voice_volume = st.slider("Volumen voz", 0.0, 2.0, 1.0, 0.05)
+music_fade = st.slider("Fade música (seg)", 0.0, 3.0, 1.0, 0.1)
+
+base_slide_duration = st.slider("Duración base por slide (si NO hay voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5)
 max_imgs = st.slider("Máx imágenes a usar", 1, 50, 12)
 
 # Estados
@@ -619,12 +814,75 @@ if "manual_paragraphs" not in st.session_state:
     st.session_state.manual_paragraphs = []
 
 
+def run_generate(
+    *,
+    titulo_final: str,
+    textos_slides: list[str],
+    imagenes_paths: list[Path],
+    work_dir: Path,
+) -> Path:
+    """
+    Pipeline común: crea voz (si aplica), guarda música (si aplica), y genera el mp4.
+    """
+    # 1) Narración = exactamente lo que aparece en slides
+    texto_narracion = normalizar_texto(" ".join(textos_slides))
+
+    voice_path = None
+    if want_voice:
+        if not api_key:
+            raise ValueError("Falta API Key de ElevenLabs.")
+        if not (voice_id_direct or "").strip():
+            raise ValueError("Voice ID está vacío.")
+        if not texto_narracion.strip():
+            raise ValueError("No hay texto para narrar.")
+        voice_path = eleven_tts_long_to_mp3(
+            text=texto_narracion,
+            api_key=api_key,
+            voice_id=voice_id_direct.strip(),
+            model_id=model_id,
+            output_format=output_format,
+            voice_settings=voice_settings,
+            out_mp3=work_dir / "voice.mp3",
+            work_dir=work_dir,
+        )
+
+    # 2) Música
+    music_path = None
+    if use_bgm:
+        if bgm_file is None:
+            raise ValueError("Seleccionaste un modo con música, pero no subiste archivo de música.")
+        music_path = save_uploaded_audio(bgm_file, work_dir / "audio")
+        if not music_path or not music_path.exists():
+            raise ValueError("No pude guardar el archivo de música.")
+
+    # 3) Video
+    out_video = crear_video(
+        textos_slides=textos_slides,
+        imagenes=imagenes_paths,
+        titulo=titulo_final,
+        overlay_text=overlay_text,
+        voice_path=voice_path,
+        music_path=music_path,
+        voice_volume=voice_volume,
+        music_volume=music_volume,
+        music_fade=music_fade,
+        base_slide_duration=base_slide_duration,
+        work_dir=work_dir,
+    )
+    return out_video
+
+
 # =========================
 # MODO URL
 # =========================
 if modo == "Desde URL de El Tiempo":
     url = st.text_input("URL del artículo", placeholder="https://www.eltiempo.com/...")
-    uploaded_extra = st.file_uploader("Sube imágenes extra (opcional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+    uploaded_extra = st.file_uploader(
+        "Sube imágenes extra (opcional)",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key="url_extra_imgs",
+    )
 
     if st.button("1) Extraer contenido", type="primary", disabled=not bool(url)):
         try:
@@ -660,9 +918,12 @@ if modo == "Desde URL de El Tiempo":
         st.subheader("3) Generar video")
 
         if st.button("Generar video", type="primary", key="url_generate"):
-            # Reglas mínimas
-            if include_audio and not api_key:
-                st.error("Falta API Key de ElevenLabs (ponla en Secrets o pégala en sidebar).")
+            # Validaciones de modo
+            if want_voice and not api_key:
+                st.error("Falta API Key de ElevenLabs.")
+                st.stop()
+            if want_music_required and bgm_file is None:
+                st.error("En 'Solo Texto + Música' debes subir un archivo de música.")
                 st.stop()
 
             if include_title and not (titulo_in or "").strip():
@@ -678,49 +939,28 @@ if modo == "Desde URL de El Tiempo":
             imgs_dir.mkdir(exist_ok=True)
 
             progress = st.progress(0, text="Iniciando...")
-
             try:
                 progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_in) if include_title else "video"
-
                 textos_slides = build_textos_slides(include_title, titulo_in, selected_pars)
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
-                # Narración = EXACTAMENTE lo que se seleccionó (representado en textos_slides)
-                texto_narracion = normalizar_texto(" ".join(textos_slides))
-
                 progress.progress(30, text="Descargando imágenes del artículo...")
-                downloaded_imgs = descargar_imagenes(data["img_urls"][:max_imgs], imgs_dir, max_workers=10)
+                imgs = descargar_imagenes(data["img_urls"][:max_imgs], imgs_dir, max_workers=10)
 
                 if uploaded_extra:
-                    downloaded_imgs.extend(guardar_imagenes_subidas(uploaded_extra, imgs_dir))
+                    imgs.extend(guardar_imagenes_subidas(uploaded_extra, imgs_dir))
 
-                if not downloaded_imgs:
+                if not imgs:
                     raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
 
-                audio_path = None
-                if include_audio:
-                    progress.progress(60, text="Generando narración (ElevenLabs)...")
-                    audio_path = eleven_tts_long_to_mp3(
-                        text=texto_narracion,
-                        api_key=api_key,
-                        voice_id=(voice_id_direct or DEFAULT_VOICE_ID),
-                        model_id=model_id,
-                        output_format=output_format,
-                        voice_settings=voice_settings,
-                        out_mp3=work_dir / "narracion.mp3",
-                        work_dir=work_dir,
-                    )
-
-                progress.progress(85, text="Renderizando video...")
-                out_video = crear_video(
+                progress.progress(60, text="Generando voz/música y renderizando video...")
+                out_video = run_generate(
+                    titulo_final=titulo_final,
                     textos_slides=textos_slides,
-                    imagenes=downloaded_imgs,
-                    titulo=titulo_final,
-                    audio_path=audio_path,
+                    imagenes_paths=imgs,
                     work_dir=work_dir,
-                    overlay_text=overlay_text
                 )
 
                 progress.progress(100, text="Listo ✅")
@@ -734,7 +974,7 @@ if modo == "Desde URL de El Tiempo":
             finally:
                 try:
                     shutil.rmtree(work_dir, ignore_errors=True)
-                except:
+                except Exception:
                     pass
     else:
         st.info("Pega una URL y presiona **Extraer contenido** para empezar.")
@@ -750,19 +990,18 @@ else:
     with colL:
         include_title_m = st.checkbox("Incluir título", value=True, key="manual_include_title")
         titulo_m = st.text_input("Título", value="", key="manual_title")
-
     with colR:
         uploaded_manual_imgs = st.file_uploader(
             "Sube imágenes (obligatorio)",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
-            key="manual_imgs"
+            key="manual_imgs",
         )
 
     texto_manual = st.text_area(
         "Pega aquí el texto completo (se separa por párrafos usando líneas en blanco)",
         height=220,
-        key="manual_text"
+        key="manual_text",
     )
 
     if st.button("1) Cargar texto", type="primary", key="manual_load_text"):
@@ -788,8 +1027,11 @@ else:
         st.subheader("3) Generar video")
 
         if st.button("Generar video", type="primary", key="manual_generate"):
-            if include_audio and not api_key:
-                st.error("Falta API Key de ElevenLabs (ponla en Secrets o pégala en sidebar).")
+            if want_voice and not api_key:
+                st.error("Falta API Key de ElevenLabs.")
+                st.stop()
+            if want_music_required and bgm_file is None:
+                st.error("En 'Solo Texto + Música' debes subir un archivo de música.")
                 st.stop()
 
             if include_title_m and not (titulo_m or "").strip():
@@ -809,45 +1051,24 @@ else:
             imgs_dir.mkdir(exist_ok=True)
 
             progress = st.progress(0, text="Iniciando...")
-
             try:
                 progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_m) if include_title_m else "video"
-
                 textos_slides = build_textos_slides(include_title_m, titulo_m, selected_pars)
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
-                # Narración = EXACTAMENTE lo seleccionado
-                texto_narracion = normalizar_texto(" ".join(textos_slides))
-
                 progress.progress(30, text="Guardando imágenes subidas...")
-                imgs_paths = guardar_imagenes_subidas(uploaded_manual_imgs[:max_imgs], imgs_dir)
-                if not imgs_paths:
+                imgs = guardar_imagenes_subidas(uploaded_manual_imgs[:max_imgs], imgs_dir)
+                if not imgs:
                     raise ValueError("No se pudieron procesar imágenes subidas.")
 
-                audio_path = None
-                if include_audio:
-                    progress.progress(60, text="Generando narración (ElevenLabs)...")
-                    audio_path = eleven_tts_long_to_mp3(
-                        text=texto_narracion,
-                        api_key=api_key,
-                        voice_id=(voice_id_direct or DEFAULT_VOICE_ID),
-                        model_id=model_id,
-                        output_format=output_format,
-                        voice_settings=voice_settings,
-                        out_mp3=work_dir / "narracion.mp3",
-                        work_dir=work_dir,
-                    )
-
-                progress.progress(85, text="Renderizando video...")
-                out_video = crear_video(
+                progress.progress(60, text="Generando voz/música y renderizando video...")
+                out_video = run_generate(
+                    titulo_final=titulo_final,
                     textos_slides=textos_slides,
-                    imagenes=imgs_paths,
-                    titulo=titulo_final,
-                    audio_path=audio_path,
+                    imagenes_paths=imgs,
                     work_dir=work_dir,
-                    overlay_text=overlay_text
                 )
 
                 progress.progress(100, text="Listo ✅")
@@ -861,7 +1082,7 @@ else:
             finally:
                 try:
                     shutil.rmtree(work_dir, ignore_errors=True)
-                except:
+                except Exception:
                     pass
     else:
         st.info("Pega texto y presiona **Cargar texto** para generar los párrafos seleccionables.")
