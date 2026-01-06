@@ -1,8 +1,11 @@
-streamlit>=1.35
+streamlit>=1.32
 requests>=2.31
 beautifulsoup4>=4.12
-pillow==9.5.0
+
 moviepy>=1.0.3
 imageio-ffmpeg>=0.4.9
+
+pillow==9.5.0
+
 tqdm>=4.66
 numpy>=1.26
