@@ -13,14 +13,21 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
-# --- FIX Pillow>=10 (MoviePy usa Image.ANTIALIAS) ---
+
+# --- FIX Pillow>=10 (MoviePy usa Image.ANTIALIAS en algunas versiones) ---
 if not hasattr(Image, "ANTIALIAS"):
     try:
         Image.ANTIALIAS = Image.Resampling.LANCZOS  # Pillow>=10
     except Exception:
         Image.ANTIALIAS = Image.LANCZOS
 
-from moviepy.editor import ( ImageClip, VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip )
+from moviepy.editor import (
+    ImageClip,
+    VideoFileClip,
+    concatenate_videoclips,
+    AudioFileClip,
+    CompositeAudioClip,
+)
 from moviepy.audio.fx.all import audio_loop, audio_fadein, audio_fadeout, volumex
 import imageio_ffmpeg
 
@@ -38,26 +45,24 @@ HEADERS_FAKE = {
     "Referer": "https://www.eltiempo.com/",
 }
 
+# Resolución fija 1080p (si te sigue crasheando, baja a 1280x720)
 RES_W, RES_H = 1920, 1080
-FPS = 24
+
+# FPS recomendado para Streamlit Cloud (menor carga)
+DEFAULT_FPS = 15
 
 DEFAULT_SLIDE_DURATION = 7.0
 MIN_SLIDE_DURATION_WITH_VOICE = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
 
-# Texto por slide (antes del wrap 30/2)
 SLIDE_TEXT_MAX_CHARS = 60
 SLIDE_TEXT_MAX_SENTENCES = 1
 
-# Render: 30 chars por línea, 2 líneas por imagen
 RENDER_WRAP_WIDTH = 30
 RENDER_LINES_PER_IMAGE = 2
 
-# ✅ Tamaño de fuente
-FONT_SIZE = 40
-
-# ✅ Voice ID por defecto
+FONT_SIZE = 50
 DEFAULT_VOICE_ID = "4XUsiqPDK4UACIM2BILe"
 
 
@@ -415,7 +420,7 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
 
 
 # =========================
-# ElevenLabs: long TTS (MP3)
+# ElevenLabs: long TTS
 # =========================
 def model_char_limit(model_id: str) -> int:
     if model_id == "eleven_multilingual_v2":
@@ -488,7 +493,7 @@ def eleven_tts_long_to_mp3(
 
     part_files = []
     for i, chunk in enumerate(chunks, start=1):
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        url = f"{ELEVEN_BASE}/v1/text-to-speech/{voice_id}"
         params = {"output_format": output_format}
         payload = {"text": chunk, "model_id": model_id, "voice_settings": voice_settings}
 
@@ -518,10 +523,12 @@ def eleven_tts_long_to_mp3(
 
     out_mp3 = out_mp3.resolve()
 
+    # concat copy
     cmd = [ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(out_mp3)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     if proc.returncode != 0:
+        # fallback re-encode
         cmd2 = [
             ffmpeg_exe(),
             "-y",
@@ -554,7 +561,7 @@ def build_final_audio_clip(
     voice_volume: float,
     music_volume: float,
     fade_sec: float,
-) -> AudioFileClip | CompositeAudioClip | None:
+):
     if not voice_path and not music_path:
         return None
 
@@ -587,28 +594,18 @@ def build_final_audio_clip(
 
 
 # =========================
-# END CLIPS: CTA + OUTRO (resize/crop/pad to 1920x1080)
+# END CLIPS: CTA + OUTRO
 # =========================
 def fit_clip_to_1080p(clip: VideoFileClip) -> VideoFileClip:
-    """
-    Ajusta a 1920x1080 SIN deformar:
-    - resize por altura a 1080
-    - si queda ancho > 1920 => crop centrado
-    - si queda ancho < 1920 => padding negro centrado
-    """
     c = clip.resize(height=RES_H)
-
     if c.w > RES_W:
         x1 = (c.w - RES_W) / 2
         x2 = x1 + RES_W
         c = c.crop(x1=x1, x2=x2)
     elif c.w < RES_W:
         c = c.on_color(size=(RES_W, RES_H), color=(0, 0, 0), pos=("center", "center"))
-
-    # por si un archivo raro queda diferente
     if c.h != RES_H:
         c = c.resize(height=RES_H)
-
     return c
 
 
@@ -622,6 +619,16 @@ def save_uploaded_video(uploaded_file, out_dir: Path, name: str) -> Path | None:
     return p
 
 
+def save_uploaded_audio(uploaded_file, out_dir: Path) -> Path | None:
+    if not uploaded_file:
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", uploaded_file.name)
+    p = out_dir / f"bgm_{safe_name}"
+    p.write_bytes(uploaded_file.getvalue())
+    return p
+
+
 # =========================
 # VIDEO
 # =========================
@@ -629,6 +636,23 @@ def safe_filename(title: str, max_len: int = 60) -> str:
     s = "".join(ch for ch in (title or "") if ch.isalnum() or ch in " _-").strip()
     s = s[:max_len].strip()
     return s or "video"
+
+
+def get_audio_duration(path: Path) -> float | None:
+    if not path or not path.exists():
+        return None
+    clip = None
+    try:
+        clip = AudioFileClip(str(path))
+        return float(clip.duration)
+    except Exception:
+        return None
+    finally:
+        try:
+            if clip:
+                clip.close()
+        except Exception:
+            pass
 
 
 def crear_video(
@@ -642,6 +666,7 @@ def crear_video(
     music_volume: float,
     music_fade: float,
     base_slide_duration: float,
+    fps: int,
     work_dir: Path,
     cta_video_path: Path | None,
     outro_video_path: Path | None,
@@ -658,13 +683,8 @@ def crear_video(
     if not slide_imgs:
         raise ValueError("No se generaron slides (slide_imgs vacío).")
 
-    # 2) Decide duración por slide
-    voice_duration = None
-    if voice_path and voice_path.exists():
-        try:
-            voice_duration = float(AudioFileClip(str(voice_path)).duration)
-        except Exception:
-            voice_duration = None
+    # 2) Duración
+    voice_duration = get_audio_duration(voice_path) if voice_path else None
 
     if voice_duration and voice_duration > 0:
         per_slide = max(MIN_SLIDE_DURATION_WITH_VOICE, voice_duration / len(slide_imgs))
@@ -673,10 +693,11 @@ def crear_video(
         per_slide = float(base_slide_duration)
         main_duration = per_slide * len(slide_imgs)
 
-    clips = [ImageClip(str(p)).set_duration(per_slide) for p in slide_imgs]
-    main_video = concatenate_videoclips(clips, method="compose")
+    # 3) Main video
+    image_clips = [ImageClip(str(p)).set_duration(per_slide) for p in slide_imgs]
+    main_video = concatenate_videoclips(image_clips, method="compose")
 
-    # 3) Audio en el main video (voz y/o música)
+    # 4) Audio main
     target_audio_duration = float(voice_duration) if voice_duration and voice_duration > 0 else float(main_duration)
     audio_clip = build_final_audio_clip(
         voice_path=voice_path if (voice_path and voice_path.exists()) else None,
@@ -686,13 +707,12 @@ def crear_video(
         music_volume=music_volume,
         fade_sec=music_fade,
     )
-
     if audio_clip:
         main_video = main_video.set_audio(audio_clip).set_duration(target_audio_duration)
     else:
         main_video = main_video.set_duration(main_duration)
 
-    # 4) Append CTA + Outro
+    # 5) Append CTA + Outro
     final_clips = [main_video]
     extra_opened = []
 
@@ -710,17 +730,21 @@ def crear_video(
     final = concatenate_videoclips(final_clips, method="compose")
 
     out = work_dir / f"{safe_filename(titulo)}.mp4"
-    final.write_videofile(
-            str(out_path),
-            fps=fps,                  # baja esto a 15 por defecto en Streamlit
-            codec="libx264",
-            audio_codec="aac",
-            preset="ultrafast",       # o "veryfast"
-            threads=2,                # 2 suele ser más estable en Cloud
-            ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
-        )
 
-    # cleanup
+    # 6) Encoding optimizado para Streamlit Cloud
+    final.write_videofile(
+        str(out),
+        fps=int(fps),
+        codec="libx264",
+        audio_codec="aac",
+        preset="ultrafast",  # clave para evitar "Oh no" en Cloud
+        threads=2,
+        bitrate="1500k",
+        ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        logger=None,  # reduce logs
+    )
+
+    # cleanup (importantísimo)
     try:
         final.close()
     except Exception:
@@ -729,11 +753,19 @@ def crear_video(
         main_video.close()
     except Exception:
         pass
+
+    for c in image_clips:
+        try:
+            c.close()
+        except Exception:
+            pass
+
     try:
         if audio_clip:
             audio_clip.close()
     except Exception:
         pass
+
     for c in extra_opened:
         try:
             c.close()
@@ -757,16 +789,6 @@ def build_textos_slides(include_title: bool, titulo: str, selected_pars: list[st
         if p:
             textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
     return [t for t in textos_slides if t.strip()]
-
-
-def save_uploaded_audio(uploaded_file, out_dir: Path) -> Path | None:
-    if not uploaded_file:
-        return None
-    out_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", uploaded_file.name)
-    p = out_dir / f"bgm_{safe_name}"
-    p.write_bytes(uploaded_file.getvalue())
-    return p
 
 
 # =========================
@@ -793,11 +815,9 @@ with st.sidebar:
         ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"],
         index=0,
     )
-    output_format = st.selectbox(
-        "Formato (MP3)",
-        ["mp3_44100_128", "mp3_44100_192"],
-        index=0,
-    )
+
+    # Solo formatos MP3 comunes/seguros
+    output_format = st.selectbox("Formato (MP3)", ["mp3_44100_128", "mp3_44100_192"], index=0)
 
     voice_id_direct = st.text_input("Voice ID", value=DEFAULT_VOICE_ID)
 
@@ -856,10 +876,11 @@ music_volume = st.slider("Volumen música", 0.0, 1.0, 0.18, 0.01)
 voice_volume = st.slider("Volumen voz", 0.0, 2.0, 1.0, 0.05)
 music_fade = st.slider("Fade música (seg)", 0.0, 3.0, 1.0, 0.1)
 
+fps = st.selectbox("FPS (recomendado 15 en Streamlit Cloud)", [15, 24], index=0)
 base_slide_duration = st.slider("Duración base por slide (si NO hay voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5)
 max_imgs = st.slider("Máx imágenes a usar", 1, 50, 12)
 
-# ✅ CTA / Cortinilla
+# CTA / Cortinilla
 st.subheader("CTA y Cierre (opcional)")
 cta_video_upload = st.file_uploader(
     "Video CTA (opcional) - MP4/MOV/WEBM",
@@ -930,6 +951,7 @@ def run_generate(
         music_volume=music_volume,
         music_fade=music_fade,
         base_slide_duration=base_slide_duration,
+        fps=int(fps),
         work_dir=work_dir,
         cta_video_path=cta_path,
         outro_video_path=outro_path,
@@ -1015,7 +1037,6 @@ if modo == "Desde URL de El Tiempo":
                 if not imgs:
                     raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
 
-                # Guardar CTA/Outro en work_dir
                 cta_path = save_uploaded_video(cta_video_upload, work_dir / "endclips", "cta")
                 outro_path = save_uploaded_video(outro_video_upload, work_dir / "endclips", "outro")
 
@@ -1126,7 +1147,6 @@ else:
                 if not imgs:
                     raise ValueError("No se pudieron procesar imágenes subidas.")
 
-                # Guardar CTA/Outro en work_dir
                 cta_path = save_uploaded_video(cta_video_upload, work_dir / "endclips", "cta")
                 outro_path = save_uploaded_video(outro_video_upload, work_dir / "endclips", "outro")
 
