@@ -47,9 +47,9 @@ HEADERS_FAKE = {
 }
 
 RES_W, RES_H = 1920, 1080
-DEFAULT_FPS = 15
+DEFAULT_FPS = 24
 
-DEFAULT_SLIDE_DURATION = 7.0
+DEFAULT_SLIDE_DURATION = 6.0
 MIN_SLIDE_DURATION_WITH_VOICE = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
@@ -675,37 +675,39 @@ def get_audio_duration(path: Path) -> float | None:
 def add_logo_overlay(main_clip, logo_png_path: Path, position: str, scale: float, margin: int):
     """
     Overlay PNG con transparencia sobre el video principal.
+    Si el PNG ya es 1920x1080 (o coincide con el video), NO se escala.
     Se aplica SOLO al main_clip (no al cierre).
     """
     if not logo_png_path or not logo_png_path.exists():
         return main_clip
 
-    logo = (
-        ImageClip(str(logo_png_path))
-        .set_duration(main_clip.duration)
-        .resize(scale)
-        .set_position(position)
-    )
+    # Leemos tamaño real del PNG
+    try:
+        with Image.open(logo_png_path) as im:
+            lw, lh = im.size
+    except Exception:
+        lw, lh = (0, 0)
 
-    # margin: ajustamos usando posiciones tipo ("right","top") con padding manual
-    # MoviePy permite funciones para posición.
+    logo = ImageClip(str(logo_png_path)).set_duration(main_clip.duration)
+
+    # Si el overlay ya es del tamaño del video, NO lo alteramos
+    if lw == main_clip.w and lh == main_clip.h:
+        logo = logo.set_position((0, 0))
+        return CompositeVideoClip([main_clip, logo], size=(main_clip.w, main_clip.h))
+
+    # Si no coincide, entonces sí aplicamos escala + posición con margen
+    logo = logo.resize(scale)
+
     def pos_func(t):
-        x, y = 0, 0
         if position == "top-left":
-            x, y = margin, margin
-        elif position == "top-right":
-            x = main_clip.w - logo.w - margin
-            y = margin
-        elif position == "bottom-left":
-            x = margin
-            y = main_clip.h - logo.h - margin
-        elif position == "bottom-right":
-            x = main_clip.w - logo.w - margin
-            y = main_clip.h - logo.h - margin
-        else:
-            x = main_clip.w - logo.w - margin
-            y = margin
-        return (x, y)
+            return (margin, margin)
+        if position == "top-right":
+            return (main_clip.w - logo.w - margin, margin)
+        if position == "bottom-left":
+            return (margin, main_clip.h - logo.h - margin)
+        if position == "bottom-right":
+            return (main_clip.w - logo.w - margin, main_clip.h - logo.h - margin)
+        return (main_clip.w - logo.w - margin, margin)
 
     logo = logo.set_position(pos_func)
     return CompositeVideoClip([main_clip, logo], size=(main_clip.w, main_clip.h))
@@ -802,7 +804,7 @@ def crear_video(
         audio_codec="aac",
         preset="ultrafast",
         threads=2,
-        bitrate="1500k",
+        bitrate="1000k",
         ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
         logger=None,
     )
