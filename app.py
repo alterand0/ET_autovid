@@ -27,6 +27,7 @@ from moviepy.editor import (
     concatenate_videoclips,
     AudioFileClip,
     CompositeAudioClip,
+    CompositeVideoClip,
 )
 from moviepy.audio.fx.all import audio_loop, audio_fadein, audio_fadeout, volumex
 import imageio_ffmpeg
@@ -45,10 +46,7 @@ HEADERS_FAKE = {
     "Referer": "https://www.eltiempo.com/",
 }
 
-# Resolución fija 1080p (si te sigue crasheando, baja a 1280x720)
 RES_W, RES_H = 1920, 1080
-
-# FPS recomendado para Streamlit Cloud (menor carga)
 DEFAULT_FPS = 15
 
 DEFAULT_SLIDE_DURATION = 7.0
@@ -62,8 +60,20 @@ SLIDE_TEXT_MAX_SENTENCES = 1
 RENDER_WRAP_WIDTH = 30
 RENDER_LINES_PER_IMAGE = 2
 
-FONT_SIZE = 40
-DEFAULT_VOICE_ID = "4XUsiqPDK4UACIM2BILe"
+FONT_SIZE = 50
+
+# ✅ mínimo de imágenes
+MIN_IMAGES_REQUIRED = 5
+
+# Voces
+VOICE_OPTIONS = {
+    "Luisa": "7nCYbNPCi8RLAKVnYEoO",
+    "JC News": "4XUsiqPDK4UACIM2BILe",
+    "Juan": "WOSzFvlJRm2hkYb3KA5w",
+    "Isabella": "p18tR9wFA5Ng9WhfWI0o",
+    "El Faraón": "W1hAcdh0RNsPYUA7fkJh",
+    "Fernando": "dlGxemPxFMTY7iXagmOj",
+}
 
 
 # =========================
@@ -523,12 +533,10 @@ def eleven_tts_long_to_mp3(
 
     out_mp3 = out_mp3.resolve()
 
-    # concat copy
     cmd = [ffmpeg_exe(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(out_mp3)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     if proc.returncode != 0:
-        # fallback re-encode
         cmd2 = [
             ffmpeg_exe(),
             "-y",
@@ -594,7 +602,7 @@ def build_final_audio_clip(
 
 
 # =========================
-# END CLIPS: CTA + OUTRO
+# END CLIP (CIERRE) + FIT TO 1080P
 # =========================
 def fit_clip_to_1080p(clip: VideoFileClip) -> VideoFileClip:
     c = clip.resize(height=RES_H)
@@ -629,6 +637,15 @@ def save_uploaded_audio(uploaded_file, out_dir: Path) -> Path | None:
     return p
 
 
+def save_uploaded_png(uploaded_file, out_dir: Path, name: str) -> Path | None:
+    if not uploaded_file:
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    p = out_dir / f"{name}.png"
+    p.write_bytes(uploaded_file.getvalue())
+    return p
+
+
 # =========================
 # VIDEO
 # =========================
@@ -655,6 +672,45 @@ def get_audio_duration(path: Path) -> float | None:
             pass
 
 
+def add_logo_overlay(main_clip, logo_png_path: Path, position: str, scale: float, margin: int):
+    """
+    Overlay PNG con transparencia sobre el video principal.
+    Se aplica SOLO al main_clip (no al cierre).
+    """
+    if not logo_png_path or not logo_png_path.exists():
+        return main_clip
+
+    logo = (
+        ImageClip(str(logo_png_path))
+        .set_duration(main_clip.duration)
+        .resize(scale)
+        .set_position(position)
+    )
+
+    # margin: ajustamos usando posiciones tipo ("right","top") con padding manual
+    # MoviePy permite funciones para posición.
+    def pos_func(t):
+        x, y = 0, 0
+        if position == "top-left":
+            x, y = margin, margin
+        elif position == "top-right":
+            x = main_clip.w - logo.w - margin
+            y = margin
+        elif position == "bottom-left":
+            x = margin
+            y = main_clip.h - logo.h - margin
+        elif position == "bottom-right":
+            x = main_clip.w - logo.w - margin
+            y = main_clip.h - logo.h - margin
+        else:
+            x = main_clip.w - logo.w - margin
+            y = margin
+        return (x, y)
+
+    logo = logo.set_position(pos_func)
+    return CompositeVideoClip([main_clip, logo], size=(main_clip.w, main_clip.h))
+
+
 def crear_video(
     textos_slides: list[str],
     imagenes: list[Path],
@@ -668,8 +724,11 @@ def crear_video(
     base_slide_duration: float,
     fps: int,
     work_dir: Path,
-    cta_video_path: Path | None,
-    outro_video_path: Path | None,
+    cierre_video_path: Path | None,
+    logo_png_path: Path | None,
+    logo_position: str,
+    logo_scale: float,
+    logo_margin: int,
 ) -> Path:
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
@@ -712,39 +771,43 @@ def crear_video(
     else:
         main_video = main_video.set_duration(main_duration)
 
-    # 5) Append CTA + Outro
+    # 5) Logo overlay SOLO en el video principal (hasta antes del cierre)
+    if logo_png_path and logo_png_path.exists():
+        main_video = add_logo_overlay(
+            main_video,
+            logo_png_path=logo_png_path,
+            position=logo_position,
+            scale=logo_scale,
+            margin=logo_margin,
+        )
+
+    # 6) Append CIERRE (sin logo)
     final_clips = [main_video]
-    extra_opened = []
+    cierre_clip = None
 
-    def add_end_clip(p: Path | None):
-        if not p or not p.exists():
-            return
-        vc = VideoFileClip(str(p))
-        vc = fit_clip_to_1080p(vc)
-        extra_opened.append(vc)
-        final_clips.append(vc)
-
-    add_end_clip(cta_video_path)
-    add_end_clip(outro_video_path)
+    if cierre_video_path and cierre_video_path.exists():
+        cierre_clip = VideoFileClip(str(cierre_video_path))
+        cierre_clip = fit_clip_to_1080p(cierre_clip)
+        final_clips.append(cierre_clip)
 
     final = concatenate_videoclips(final_clips, method="compose")
 
     out = work_dir / f"{safe_filename(titulo)}.mp4"
 
-    # 6) Encoding optimizado para Streamlit Cloud
+    # 7) Encoding optimizado para Streamlit Cloud
     final.write_videofile(
         str(out),
         fps=int(fps),
         codec="libx264",
         audio_codec="aac",
-        preset="ultrafast",  # clave para evitar "Oh no" en Cloud
+        preset="ultrafast",
         threads=2,
         bitrate="1500k",
         ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
-        logger=None,  # reduce logs
+        logger=None,
     )
 
-    # cleanup (importantísimo)
+    # cleanup
     try:
         final.close()
     except Exception:
@@ -753,24 +816,21 @@ def crear_video(
         main_video.close()
     except Exception:
         pass
-
     for c in image_clips:
         try:
             c.close()
         except Exception:
             pass
-
     try:
         if audio_clip:
             audio_clip.close()
     except Exception:
         pass
-
-    for c in extra_opened:
-        try:
-            c.close()
-        except Exception:
-            pass
+    try:
+        if cierre_clip:
+            cierre_clip.close()
+    except Exception:
+        pass
 
     return out
 
@@ -816,10 +876,12 @@ with st.sidebar:
         index=0,
     )
 
-    # Solo formatos MP3 comunes/seguros
     output_format = st.selectbox("Formato (MP3)", ["mp3_44100_128", "mp3_44100_192"], index=0)
 
-    voice_id_direct = st.text_input("Voice ID", value=DEFAULT_VOICE_ID)
+    # ✅ Voice ID en desplegable
+    voice_name = st.selectbox("Voz", list(VOICE_OPTIONS.keys()), index=1)  # default JC News
+    voice_id_direct = VOICE_OPTIONS[voice_name]
+    st.caption(f"voice_id = {voice_id_direct}")
 
     st.subheader("Voice settings")
     stability = st.slider("stability", 0.0, 1.0, 0.45, 0.01)
@@ -878,22 +940,31 @@ music_fade = st.slider("Fade música (seg)", 0.0, 3.0, 1.0, 0.1)
 
 fps = st.selectbox("FPS (recomendado 15 en Streamlit Cloud)", [15, 24], index=0)
 base_slide_duration = st.slider("Duración base por slide (si NO hay voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5)
-max_imgs = st.slider("Máx imágenes a usar", 1, 50, 12)
 
-# CTA / Cortinilla
-st.subheader("CTA y Cierre (opcional)")
-cta_video_upload = st.file_uploader(
-    "Video CTA (opcional) - MP4/MOV/WEBM",
+# ✅ Cierre (un solo archivo)
+st.subheader("Cierre (opcional)")
+cierre_video_upload = st.file_uploader(
+    "Video de cierre (opcional) - MP4/MOV/WEBM",
     type=["mp4", "mov", "webm"],
     accept_multiple_files=False,
-    key="cta_video",
+    key="cierre_video",
 )
-outro_video_upload = st.file_uploader(
-    "Video cortinilla cierre (opcional) - MP4/MOV/WEBM",
-    type=["mp4", "mov", "webm"],
+
+# ✅ Mosca/logo overlay
+st.subheader("Mosca / Logo (opcional)")
+logo_png_upload = st.file_uploader(
+    "Sube logo PNG transparente (opcional)",
+    type=["png"],
     accept_multiple_files=False,
-    key="outro_video",
+    key="logo_png",
 )
+
+logo_position = st.selectbox("Posición del logo", ["top-right", "top-left", "bottom-right", "bottom-left"], index=0)
+logo_scale = st.slider("Tamaño del logo (escala)", 0.05, 0.60, 0.18, 0.01)
+logo_margin = st.slider("Margen del logo (px)", 0, 80, 24, 1)
+
+st.info(f"✅ Requisito: mínimo {MIN_IMAGES_REQUIRED} imágenes para generar.")
+
 
 # Estados
 if "extracted" not in st.session_state:
@@ -908,23 +979,24 @@ def run_generate(
     textos_slides: list[str],
     imagenes_paths: list[Path],
     work_dir: Path,
-    cta_path: Path | None,
-    outro_path: Path | None,
+    cierre_path: Path | None,
+    logo_path: Path | None,
 ) -> Path:
     texto_narracion = normalizar_texto(" ".join(textos_slides))
 
+    # Voz
     voice_path = None
     if want_voice:
         if not api_key:
             raise ValueError("Falta API Key de ElevenLabs.")
-        if not (voice_id_direct or "").strip():
-            raise ValueError("Voice ID está vacío.")
+        if not voice_id_direct:
+            raise ValueError("Voice ID inválido.")
         if not texto_narracion.strip():
             raise ValueError("No hay texto para narrar.")
         voice_path = eleven_tts_long_to_mp3(
             text=texto_narracion,
             api_key=api_key,
-            voice_id=voice_id_direct.strip(),
+            voice_id=voice_id_direct,
             model_id=model_id,
             output_format=output_format,
             voice_settings=voice_settings,
@@ -932,6 +1004,7 @@ def run_generate(
             work_dir=work_dir,
         )
 
+    # Música
     music_path = None
     if use_bgm:
         if bgm_file is None:
@@ -953,8 +1026,11 @@ def run_generate(
         base_slide_duration=base_slide_duration,
         fps=int(fps),
         work_dir=work_dir,
-        cta_video_path=cta_path,
-        outro_video_path=outro_path,
+        cierre_video_path=cierre_path,
+        logo_png_path=logo_path,
+        logo_position=logo_position,
+        logo_scale=logo_scale,
+        logo_margin=logo_margin,
     )
     return out_video
 
@@ -976,7 +1052,7 @@ if modo == "Desde URL de El Tiempo":
             with st.spinner("Extrayendo..."):
                 titulo, parrafos, img_urls = extraer_contenido_articulo(url)
             st.session_state.extracted = {"titulo": titulo, "parrafos": parrafos, "img_urls": img_urls}
-            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes: {len(img_urls)}")
+            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes encontradas: {len(img_urls)}")
         except Exception as e:
             st.session_state.extracted = None
             st.error(f"No pude extraer: {e}")
@@ -1031,14 +1107,19 @@ if modo == "Desde URL de El Tiempo":
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
                 progress.progress(30, text="Descargando imágenes del artículo...")
-                imgs = descargar_imagenes(data["img_urls"][:max_imgs], imgs_dir, max_workers=10)
+                # descargamos todas las que podamos; el mínimo se valida después
+                imgs = descargar_imagenes(data["img_urls"], imgs_dir, max_workers=10)
+
                 if uploaded_extra:
                     imgs.extend(guardar_imagenes_subidas(uploaded_extra, imgs_dir))
-                if not imgs:
-                    raise ValueError("No hay imágenes disponibles (ni del artículo ni subidas).")
 
-                cta_path = save_uploaded_video(cta_video_upload, work_dir / "endclips", "cta")
-                outro_path = save_uploaded_video(outro_video_upload, work_dir / "endclips", "outro")
+                # ✅ validar mínimo de imágenes
+                if len(imgs) < MIN_IMAGES_REQUIRED:
+                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente tienes {len(imgs)}. Sube más fotos para continuar.")
+                    st.stop()
+
+                cierre_path = save_uploaded_video(cierre_video_upload, work_dir / "endclips", "cierre")
+                logo_path = save_uploaded_png(logo_png_upload, work_dir / "overlay", "logo") if logo_png_upload else None
 
                 progress.progress(60, text="Generando voz/música y renderizando video...")
                 out_video = run_generate(
@@ -1046,8 +1127,8 @@ if modo == "Desde URL de El Tiempo":
                     textos_slides=textos_slides,
                     imagenes_paths=imgs,
                     work_dir=work_dir,
-                    cta_path=cta_path,
-                    outro_path=outro_path,
+                    cierre_path=cierre_path,
+                    logo_path=logo_path,
                 )
 
                 progress.progress(100, text="Listo ✅")
@@ -1079,7 +1160,7 @@ else:
         titulo_m = st.text_input("Título", value="", key="manual_title")
     with colR:
         uploaded_manual_imgs = st.file_uploader(
-            "Sube imágenes (obligatorio)",
+            "Sube imágenes (mínimo 5)",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             key="manual_imgs",
@@ -1127,7 +1208,7 @@ else:
                 st.error("No hay textos seleccionados (ni título ni párrafos).")
                 st.stop()
             if not uploaded_manual_imgs:
-                st.error("En modo manual debes subir al menos 1 imagen.")
+                st.error(f"En modo manual debes subir al menos {MIN_IMAGES_REQUIRED} imágenes.")
                 st.stop()
 
             work_dir = Path(tempfile.mkdtemp(prefix="manual_video_"))
@@ -1143,12 +1224,15 @@ else:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
                 progress.progress(30, text="Guardando imágenes subidas...")
-                imgs = guardar_imagenes_subidas(uploaded_manual_imgs[:max_imgs], imgs_dir)
-                if not imgs:
-                    raise ValueError("No se pudieron procesar imágenes subidas.")
+                imgs = guardar_imagenes_subidas(uploaded_manual_imgs, imgs_dir)
 
-                cta_path = save_uploaded_video(cta_video_upload, work_dir / "endclips", "cta")
-                outro_path = save_uploaded_video(outro_video_upload, work_dir / "endclips", "outro")
+                # ✅ validar mínimo de imágenes
+                if len(imgs) < MIN_IMAGES_REQUIRED:
+                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente tienes {len(imgs)}. Sube más fotos para continuar.")
+                    st.stop()
+
+                cierre_path = save_uploaded_video(cierre_video_upload, work_dir / "endclips", "cierre")
+                logo_path = save_uploaded_png(logo_png_upload, work_dir / "overlay", "logo") if logo_png_upload else None
 
                 progress.progress(60, text="Generando voz/música y renderizando video...")
                 out_video = run_generate(
@@ -1156,8 +1240,8 @@ else:
                     textos_slides=textos_slides,
                     imagenes_paths=imgs,
                     work_dir=work_dir,
-                    cta_path=cta_path,
-                    outro_path=outro_path,
+                    cierre_path=cierre_path,
+                    logo_path=logo_path,
                 )
 
                 progress.progress(100, text="Listo ✅")
