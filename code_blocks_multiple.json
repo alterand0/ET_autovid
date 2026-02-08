@@ -1,0 +1,332 @@
+[
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "import re\nimport json\nimport shutil\nimport hashlib\nimport tempfile\nimport subprocess\nimport textwrap\nfrom io import BytesIO\nfrom pathlib import Path\nfrom concurrent.futures import ThreadPoolExecutor, as_completed\n\nimport requests\nimport streamlit as st\nfrom bs4 import BeautifulSoup\nfrom PIL import Image, ImageDraw, ImageFont\n\n# --- FIX Pillow>=10 (MoviePy usa Image.ANTIALIAS en algunas versiones) ---\nif not hasattr(Image, \"ANTIALIAS\"):\n    try:\n        Image.ANTIALIAS = Image.Resampling.LANCZOS  # Pillow>=10\n    except Exception:\n        Image.ANTIALIAS = Image.LANCZOS\n\nfrom moviepy.editor import (\n    ImageClip,\n    VideoFileClip,\n    concatenate_videoclips,\n    AudioFileClip,\n    CompositeAudioClip,\n    CompositeVideoClip,\n)\nfrom moviepy.audio.fx.all import audio_loop, audio_fadein, audio_fadeout, volumex\nimport imageio_ffmpeg\n\n\n# =========================\n# CONFIG\n# =========================\nHEADERS_FAKE = {\n    \"User-Agent\": (\n        \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) \"\n        \"AppleWebKit/537.36 (KHTML, like Gecko) \"\n        \"Chrome/120.0.0.0 Safari/537.36\"\n    ),\n    \"Accept-Language\": \"es-ES,es;q=0.9\",\n    \"Referer\": \"https://www.eltiempo.com/\",\n}\n\nRES_W, RES_H = 1920, 1080\nDEFAULT_FPS = 24\n\nDEFAULT_SLIDE_DURATION = 6.0\nMIN_SLIDE_DURATION_WITH_VOICE = 3.5\n\nELEVEN_BASE = \"https://api.elevenlabs.io\"\n\nSLIDE_TEXT_MAX_CHARS = 60\nSLIDE_TEXT_MAX_SENTENCES = 1\n\nRENDER_WRAP_WIDTH = 30\nRENDER_LINES_PER_IMAGE = 2\n\nFONT_SIZE = 40\n\n# \u2705 m\u00ednimo de im\u00e1genes\nMIN_IMAGES_REQUIRED = 5\n\n# Voces\nVOICE_OPTIONS = {\n    \"Luisa\": \"7nCYbNPCi8RLAKVnYEoO\",\n    \"JC News\": \"4XUsiqPDK4UACIM2BILe\",\n    \"Juan\": \"WOSzFvlJRm2hkYb3KA5w\",\n    \"Isabella\": \"p18tR9wFA5Ng9WhfWI0o\",\n    \"El Fara\u00f3n\": \"W1hAcdh0RNsPYUA7fkJh\",\n    \"Fernando\": \"dlGxemPxFMTY7iXagmOj\",\n}\n\n\n# =========================\n#"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": " PIN gate\n# =========================\ndef require_pin_if_configured():\n    app_pin = st.secrets.get(\"APP_PIN\", \"\")\n    if not app_pin:\n        return\n\n    if \"authenticated\" not in st.session_state:\n        st.session_state.authenticated = False\n\n    if st.session_state.authenticated:\n        return\n\n    st.warning(\"\ud83d\udd12 Esta app est\u00e1 protegida con PIN.\")\n    pin = st.text_input(\"Ingresa el PIN\", type=\"password\")\n    if st.button(\"Entrar\", type=\"primary\"):\n        if pin == app_pin:\n            st.session_state.authenticated = True\n            st.success(\"Acceso concedido \u2705\")\n            st.rerun()\n        else:\n            st.error(\"PIN incorrecto \u274c\")\n\n    st.stop()\n\n\n# =========================\n# TEXT NORMALIZATION + SEGMENTATION\n# =========================\nQUOTES_MAP = str.maketrans(\n    {\n        \"\u201c\": '\"',\n        \"\u201d\": '\"',\n        \"\u201e\": '\"',\n        \"\u00ab\": '\"',\n        \"\u00bb\": '\"',\n        \"\u2018\": \"'\",\n        \"\u2019\": \"'\",\n        \"\u201a\": \"'\",\n        \"\u00b4\": \"'\",\n        \"\u2026\": \"...\",\n        \"\\u00A0\": \" \",\n    }\n)\n\nABREVIATURAS = [\n    \"Sr.\",\n    \"Sra.\",\n    \"Dr.\",\n    \"Dra.\",\n    \"Ing.\",\n    \"Lic.\",\n    \"No.\",\n    \"Nro.\",\n    \"Art.\",\n    \"P\u00e1g.\",\n    \"p. ej.\",\n    \"p.ej.\",\n    \"etc.\",\n    \"EE. UU.\",\n    \"U.S.\",\n    \"vs.\",\n]\n\n\ndef normalizar_texto(texto: str) -> str:\n    if not texto:\n        return \"\"\n    t = texto.translate(QUOTES_MAP)\n    t = re.sub(r\"\\s+\", \" \", t).strip()\n    t = re.sub(r\"\\s+([,.;:!?])\", r\"\\1\", t)\n    return t\n\n\ndef dividir_en_frases(texto: str) -> list[str]:\n    t = normalizar_texto(texto)\n    if not t:\n        return []\n\n    protect = {}\n    for i, ab in enumerate(ABREVIATURAS):\n        key = f\"__ABR{i}__\"\n        protect[key] = ab\n        t = t.replace(ab, key)\n\n    partes = re.split(r\"(?<=[\\.\\!\\?])\\s+\", t)\n\n    frases = []\n    for p in partes:\n        for k, ab "
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "in protect.items():\n            p = p.replace(k, ab)\n        p = p.strip()\n        if p:\n            frases.append(p)\n    return frases\n\n\ndef segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> list[str]:\n    frases = dividir_en_frases(texto)\n    if not frases:\n        t = normalizar_texto(texto)\n        return [t[:max_chars]] if t else []\n\n    slides = []\n    buf = []\n\n    def flush():\n        nonlocal buf\n        if buf:\n            slides.append(\" \".join(buf).strip())\n            buf = []\n\n    for fr in frases:\n        fr = fr.strip()\n        if not fr:\n            continue\n\n        cand = (\" \".join(buf + [fr])).strip()\n\n        if len(cand) <= max_chars and len(buf) < max_sentences:\n            buf.append(fr)\n            if len(buf) >= max_sentences:\n                flush()\n            continue\n\n        flush()\n\n        if len(fr) > max_chars:\n            words = fr.split()\n            tmp = []\n            for w in words:\n                cand2 = (\" \".join(tmp + [w])).strip()\n                if len(cand2) <= max_chars:\n                    tmp.append(w)\n                else:\n                    if tmp:\n                        slides.append(\" \".join(tmp))\n                    tmp = [w]\n            if tmp:\n                slides.append(\" \".join(tmp))\n        else:\n            buf = [fr]\n\n    flush()\n    return [s for s in slides if s.strip()]\n\n\ndef split_paragraphs_from_manual(text: str) -> list[str]:\n    t = (text or \"\").strip()\n    if not t:\n        return []\n    t = t.replace(\"\\r\\n\", \"\\n\").replace(\"\\r\", \"\\n\")\n    parts = [p.strip() for p in re.split(r\"\\n\\s*\\n+\", t) if p.strip()]\n    return [p for p in parts if len(normalizar_texto(p)) >= 10]\n\n\n# =========================\n# FONT\n# =========================\ndef load_font(size: int) -> ImageFont.Free"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "TypeFont:\n    for candidate in [\"DejaVuSans-Bold.ttf\", \"DejaVuSans.ttf\"]:\n        try:\n            return ImageFont.truetype(candidate, size)\n        except Exception:\n            pass\n    return ImageFont.load_default()\n\n\n# =========================\n# SCRAPER ELTIEMPO (cached)\n# =========================\n@st.cache_data(show_spinner=False, ttl=60 * 30)\ndef extraer_contenido_articulo(url: str) -> tuple[str, list[str], list[str]]:\n    r = requests.get(url, headers=HEADERS_FAKE, timeout=30)\n    r.raise_for_status()\n    soup = BeautifulSoup(r.content, \"html.parser\")\n\n    titulo_el = soup.find(\"h1\", class_=\"c-articulo__titulo\") or soup.find(\"h1\")\n    if not titulo_el:\n        raise ValueError(\"No se pudo encontrar el t\u00edtulo del art\u00edculo.\")\n    titulo = titulo_el.get_text(\" \", strip=True)\n\n    cuerpo = soup.find(\"div\", class_=\"c-cuerpo\") or soup.find(\"article\")\n    if not cuerpo:\n        raise ValueError(\"No se pudo encontrar el cuerpo del art\u00edculo.\")\n\n    parrafos = []\n    divs = cuerpo.find_all(\"div\", class_=\"paragraph\")\n    for d in divs:\n        t = d.get_text(\" \", strip=True)\n        if t:\n            parrafos.append(t)\n\n    if not parrafos:\n        for p in cuerpo.find_all(\"p\"):\n            t = p.get_text(\" \", strip=True)\n            if len(t) > 50:\n                parrafos.append(t)\n\n    imagenes_urls = set()\n\n    def limpiar_url(u):\n        if not u:\n            return None\n        u = u.strip()\n        if u.startswith(\"//\"):\n            return \"https:\" + u\n        if u.startswith(\"/\"):\n            return \"https://www.eltiempo.com\" + u\n        return u\n\n    def agregar_img(tag):\n        if not tag:\n            return\n        u = limpiar_url(tag.get(\"data-full-src\") or tag.get(\"src\"))\n        if u and (not u.lower().endswith(\".svg\")) and (\"icon\" not in u.lower()):\n    "
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "        imagenes_urls.add(u)\n\n    apertura = soup.find(\"div\", class_=\"c-articulo-apertura__media__thumb\")\n    if apertura:\n        agregar_img(apertura.find(\"img\"))\n\n    for media in cuerpo.find_all(\n        [\"figure\", \"div\"],\n        class_=[\"c-cuerpo__media__thumb\", \"c-cuerpo__media\", \"c-detail__media\"],\n    ):\n        for img in media.find_all(\"img\"):\n            agregar_img(img)\n        zoom = media.find(\"div\", class_=\"c-cuerpo__media__thumb__zoom\")\n        if zoom:\n            agregar_img(zoom.find(\"img\"))\n\n    galeria = soup.find(\"div\", class_=\"c-galeria\")\n    if galeria:\n        for img in galeria.find_all(\"img\"):\n            agregar_img(img)\n\n    return titulo, parrafos, list(imagenes_urls)\n\n\n# =========================\n# IMAGES: download + render\n# =========================\ndef ajustar_imagen(imagen: Image.Image) -> Image.Image:\n    relacion = imagen.width / max(1, imagen.height)\n    nueva_w = int(RES_H * relacion)\n    return imagen.resize((nueva_w, RES_H), Image.LANCZOS)\n\n\ndef descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) -> list[Path]:\n    out_dir.mkdir(parents=True, exist_ok=True)\n\n    def fetch(u: str) -> Path | None:\n        try:\n            resp = requests.get(u, headers=HEADERS_FAKE, timeout=20)\n            resp.raise_for_status()\n            img = Image.open(BytesIO(resp.content))\n            img = ajustar_imagen(img).convert(\"RGB\")\n            name = hashlib.md5(u.encode(\"utf-8\")).hexdigest()\n            p = out_dir / f\"img_{name}.jpg\"\n            img.save(p, quality=92)\n            return p\n        except Exception:\n            return None\n\n    paths = []\n    with ThreadPoolExecutor(max_workers=max_workers) as ex:\n        futs = [ex.submit(fetch, u) for u in urls]\n        for f in as_completed(futs):\n            p = f.resul"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "t()\n            if p:\n                paths.append(p)\n    return paths\n\n\ndef guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:\n    out_dir.mkdir(parents=True, exist_ok=True)\n    paths = []\n    for uf in (uploaded_files or []):\n        try:\n            img = Image.open(BytesIO(uf.read()))\n            img = ajustar_imagen(img).convert(\"RGB\")\n            safe_name = re.sub(r\"[^a-zA-Z0-9_\\-\\.]\", \"_\", uf.name)\n            pth = out_dir / f\"upload_{safe_name}\"\n            img.save(pth, quality=92)\n            paths.append(pth)\n        except Exception:\n            continue\n    return paths\n\n\ndef render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:\n    imagen = Image.open(imagen_path).convert(\"RGB\")\n    imagen = ajustar_imagen(imagen)\n\n    fondo = Image.new(\"RGB\", (RES_W, RES_H), color=\"black\")\n    pos = ((RES_W - imagen.width) // 2, (RES_H - imagen.height) // 2)\n    fondo.paste(imagen, pos)\n\n    texto = (texto or \"\").strip()\n    if not texto:\n        out = out_dir / f\"slide_{idx:04d}.jpg\"\n        fondo.save(out, quality=92)\n        return [out]\n\n    fuente = load_font(font_size)\n\n    lineas = textwrap.wrap(\n        re.sub(r\"\\s+\", \" \", texto).strip(),\n        width=RENDER_WRAP_WIDTH,\n        break_long_words=False,\n        break_on_hyphens=False,\n    )\n\n    bloques = [lineas[i : i + RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]\n    outs = []\n\n    for j, bloque in enumerate(bloques):\n        base = fondo.copy()\n        d = ImageDraw.Draw(base)\n\n        heights = []\n        for linea in bloque:\n            bbox = d.textbbox((0, 0), linea, font=fuente)\n            heights.append(bbox[3] - bbox[1])\n\n        total_h = sum(heights) + 10 * (len(bloque) - 1)\n        y0 = R"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "ES_H - total_h - 110\n        y = y0\n\n        for linea, h in zip(bloque, heights):\n            bbox = d.textbbox((0, 0), linea, font=fuente)\n            w = bbox[2] - bbox[0]\n            x = (RES_W - w) // 2\n\n            d.text(\n                (x, y),\n                linea,\n                font=fuente,\n                fill=\"#ffffff\",\n                stroke_width=3,\n                stroke_fill=\"#000000\",\n            )\n            y += h + 10\n\n        out = out_dir / f\"slide_{idx:04d}_{j:02d}.jpg\"\n        base.save(out, quality=92)\n        outs.append(out)\n\n    return outs\n\n\n# =========================\n# ElevenLabs: long TTS\n# =========================\ndef model_char_limit(model_id: str) -> int:\n    if model_id == \"eleven_multilingual_v2\":\n        return 9500\n    if model_id in (\"eleven_flash_v2_5\", \"eleven_turbo_v2_5\"):\n        return 39000\n    if model_id == \"eleven_v3\":\n        return 4800\n    return 4500\n\n\ndef split_text_chunks(text: str, max_chars: int) -> list[str]:\n    text = re.sub(r\"\\s+\", \" \", (text or \"\")).strip()\n    if not text:\n        return []\n    sentences = re.split(r\"(?<=[.!?])\\s+\", text)\n    chunks, cur = [], \"\"\n    for s in sentences:\n        s = s.strip()\n        if not s:\n            continue\n        cand = (cur + \" \" + s).strip() if cur else s\n        if len(cand) <= max_chars:\n            cur = cand\n        else:\n            if cur:\n                chunks.append(cur)\n            if len(s) > max_chars:\n                words = s.split()\n                tmp = \"\"\n                for w in words:\n                    cand2 = (tmp + \" \" + w).strip() if tmp else w\n                    if len(cand2) <= max_chars:\n                        tmp = cand2\n                    else:\n                        if tmp:\n                            chunks.append(tmp)\n      "
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "                  tmp = w\n                if tmp:\n                    chunks.append(tmp)\n                cur = \"\"\n            else:\n                cur = s\n    if cur:\n        chunks.append(cur)\n    return chunks\n\n\ndef ffmpeg_exe() -> str:\n    return imageio_ffmpeg.get_ffmpeg_exe()\n\n\ndef eleven_tts_long_to_mp3(\n    text: str,\n    api_key: str,\n    voice_id: str,\n    model_id: str,\n    output_format: str,\n    voice_settings: dict,\n    out_mp3: Path,\n    work_dir: Path,\n) -> Path:\n    max_chars = model_char_limit(model_id)\n    chunks = split_text_chunks(text, max_chars=max_chars)\n    if not chunks:\n        raise ValueError(\"Texto vac\u00edo para narraci\u00f3n.\")\n\n    parts_dir = work_dir / \"tts_parts\"\n    parts_dir.mkdir(parents=True, exist_ok=True)\n\n    part_files = []\n    for i, chunk in enumerate(chunks, start=1):\n        url = f\"{ELEVEN_BASE}/v1/text-to-speech/{voice_id}\"\n        params = {\"output_format\": output_format}\n        payload = {\"text\": chunk, \"model_id\": model_id, \"voice_settings\": voice_settings}\n\n        r = requests.post(\n            url,\n            params=params,\n            headers={\"xi-api-key\": api_key, \"Content-Type\": \"application/json\"},\n            data=json.dumps(payload),\n            timeout=120,\n        )\n\n        if r.status_code >= 400:\n            try:\n                detail = r.json()\n            except Exception:\n                detail = r.text[:400]\n            raise RuntimeError(f\"ElevenLabs error {r.status_code}: {detail}\")\n\n        p = parts_dir / f\"part_{i:04d}.mp3\"\n        p.write_bytes(r.content)\n        part_files.append(p)\n\n    list_file = (parts_dir / \"concat_list.txt\").resolve()\n    with list_file.open(\"w\", encoding=\"utf-8\") as f:\n        for p in part_files:\n            f.write(f\"file '{p.resolve().as_posix()}'\\n\")\n\n    out_mp3 = out_"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "mp3.resolve()\n\n    cmd = [ffmpeg_exe(), \"-y\", \"-f\", \"concat\", \"-safe\", \"0\", \"-i\", str(list_file), \"-c\", \"copy\", str(out_mp3)]\n    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n\n    if proc.returncode != 0:\n        cmd2 = [\n            ffmpeg_exe(),\n            \"-y\",\n            \"-f\",\n            \"concat\",\n            \"-safe\",\n            \"0\",\n            \"-i\",\n            str(list_file),\n            \"-c:a\",\n            \"libmp3lame\",\n            \"-b:a\",\n            \"192k\",\n            str(out_mp3),\n        ]\n        proc2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)\n        if proc2.returncode != 0:\n            raise RuntimeError(\"ffmpeg fall\u00f3 concatenando audio:\\n\" + (proc2.stderr[-1500:] or proc.stderr[-1500:]))\n\n    return out_mp3\n\n\n# =========================\n# AUDIO: build final audio clip (voice/music)\n# =========================\ndef build_final_audio_clip(\n    voice_path: Path | None,\n    music_path: Path | None,\n    target_duration: float,\n    voice_volume: float,\n    music_volume: float,\n    fade_sec: float,\n):\n    if not voice_path and not music_path:\n        return None\n\n    fade = min(max(0.0, fade_sec), max(0.0, target_duration / 4.0))\n\n    voice_clip = None\n    if voice_path and voice_path.exists():\n        voice_clip = AudioFileClip(str(voice_path))\n        voice_clip = volumex(voice_clip, voice_volume)\n\n    music_clip = None\n    if music_path and music_path.exists():\n        music_clip = AudioFileClip(str(music_path))\n        music_clip = audio_loop(music_clip, duration=target_duration)\n        music_clip = volumex(music_clip, music_volume)\n        if fade > 0:\n            music_clip = audio_fadein(music_clip, fade)\n            music_clip = audio_fadeout(music_clip, fade)\n\n    if"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": " voice_clip and music_clip:\n        return CompositeAudioClip([music_clip, voice_clip]).set_duration(target_duration)\n\n    if voice_clip:\n        return voice_clip\n\n    if music_clip:\n        return music_clip\n\n    return None\n\n\n# =========================\n# END CLIP (CIERRE) + FIT TO 1080P\n# =========================\ndef fit_clip_to_1080p(clip: VideoFileClip) -> VideoFileClip:\n    c = clip.resize(height=RES_H)\n    if c.w > RES_W:\n        x1 = (c.w - RES_W) / 2\n        x2 = x1 + RES_W\n        c = c.crop(x1=x1, x2=x2)\n    elif c.w < RES_W:\n        c = c.on_color(size=(RES_W, RES_H), color=(0, 0, 0), pos=(\"center\", \"center\"))\n    if c.h != RES_H:\n        c = c.resize(height=RES_H)\n    return c\n\n\ndef save_uploaded_video(uploaded_file, out_dir: Path, name: str) -> Path | None:\n    if not uploaded_file:\n        return None\n    out_dir.mkdir(parents=True, exist_ok=True)\n    suffix = Path(uploaded_file.name).suffix.lower() or \".mp4\"\n    p = out_dir / f\"{name}{suffix}\"\n    p.write_bytes(uploaded_file.getvalue())\n    return p\n\n\ndef save_uploaded_audio(uploaded_file, out_dir: Path) -> Path | None:\n    if not uploaded_file:\n        return None\n    out_dir.mkdir(parents=True, exist_ok=True)\n    safe_name = re.sub(r\"[^a-zA-Z0-9_\\-\\.]\", \"_\", uploaded_file.name)\n    p = out_dir / f\"bgm_{safe_name}\"\n    p.write_bytes(uploaded_file.getvalue())\n    return p\n\n\ndef save_uploaded_png(uploaded_file, out_dir: Path, name: str) -> Path | None:\n    if not uploaded_file:\n        return None\n    out_dir.mkdir(parents=True, exist_ok=True)\n    p = out_dir / f\"{name}.png\"\n    p.write_bytes(uploaded_file.getvalue())\n    return p\n\n\n# =========================\n# VIDEO\n# =========================\ndef safe_filename(title: str, max_len: int = 60) -> str:\n    s = \"\".join(ch for ch in (title or \"\") if ch.isa"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "lnum() or ch in \" _-\").strip()\n    s = s[:max_len].strip()\n    return s or \"video\"\n\n\ndef get_audio_duration(path: Path) -> float | None:\n    if not path or not path.exists():\n        return None\n    clip = None\n    try:\n        clip = AudioFileClip(str(path))\n        return float(clip.duration)\n    except Exception:\n        return None\n    finally:\n        try:\n            if clip:\n                clip.close()\n        except Exception:\n            pass\n\n\n\n\n\ndef crear_video(\n    textos_slides: list[str],\n    imagenes: list[Path],\n    titulo: str,\n    overlay_text: bool,\n    voice_path: Path | None,\n    music_path: Path | None,\n    voice_volume: float,\n    music_volume: float,\n    music_fade: float,\n    base_slide_duration: float,\n    fps: int,\n    work_dir: Path,\n    cierre_video_path: Path | None,\n) -> Path:\n    slides_dir = work_dir / \"slides\"\n    slides_dir.mkdir(parents=True, exist_ok=True)\n\n    # 1) Render slides\n    slide_imgs: list[Path] = []\n    for idx, txt in enumerate(textos_slides):\n        img_path = imagenes[idx % len(imagenes)]\n        slide_imgs.extend(render_slide(img_path, txt if overlay_text else \"\", idx, slides_dir, font_size=FONT_SIZE))\n\n    if not slide_imgs:\n        raise ValueError(\"No se generaron slides (slide_imgs vac\u00edo).\")\n\n    # 2) Duraci\u00f3n\n    voice_duration = get_audio_duration(voice_path) if voice_path else None\n\n    if voice_duration and voice_duration > 0:\n        per_slide = max(MIN_SLIDE_DURATION_WITH_VOICE, voice_duration / len(slide_imgs))\n        main_duration = voice_duration\n    else:\n        per_slide = float(base_slide_duration)\n        main_duration = per_slide * len(slide_imgs)\n\n    # 3) Main video\n    image_clips = [ImageClip(str(p)).set_duration(per_slide) for p in slide_imgs]\n    main_video = concatenate_videoclips(image_cl"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "ips, method=\"compose\")\n\n    # 4) Audio main\n    target_audio_duration = float(voice_duration) if voice_duration and voice_duration > 0 else float(main_duration)\n    audio_clip = build_final_audio_clip(\n        voice_path=voice_path if (voice_path and voice_path.exists()) else None,\n        music_path=music_path if (music_path and music_path.exists()) else None,\n        target_duration=target_audio_duration,\n        voice_volume=voice_volume,\n        music_volume=music_volume,\n        fade_sec=music_fade,\n    )\n    if audio_clip:\n        main_video = main_video.set_audio(audio_clip).set_duration(target_audio_duration)\n    else:\n        main_video = main_video.set_duration(main_duration)\n\n\n\n    # 6) Append CIERRE (sin logo)\n    final_clips = [main_video]\n    cierre_clip = None\n\n    if cierre_video_path and cierre_video_path.exists():\n        cierre_clip = VideoFileClip(str(cierre_video_path))\n        cierre_clip = fit_clip_to_1080p(cierre_clip)\n        final_clips.append(cierre_clip)\n\n    final = concatenate_videoclips(final_clips, method=\"compose\")\n\n    out = work_dir / f\"{safe_filename(titulo)}.mp4\"\n\n    # 7) Encoding optimizado para Streamlit Cloud\n    final.write_videofile(\n        str(out),\n        fps=int(fps),\n        codec=\"libx264\",\n        audio_codec=\"aac\",\n        preset=\"ultrafast\",\n        threads=2,\n        bitrate=\"1000k\",\n        ffmpeg_params=[\"-pix_fmt\", \"yuv420p\", \"-movflags\", \"+faststart\"],\n        logger=None,\n    )\n\n    # cleanup\n    try:\n        final.close()\n    except Exception:\n        pass\n    try:\n        main_video.close()\n    except Exception:\n        pass\n    for c in image_clips:\n        try:\n            c.close()\n        except Exception:\n            pass\n    try:\n        if audio_clip:\n            audio_clip.close()\n    except Exception:"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "\n        pass\n    try:\n        if cierre_clip:\n            cierre_clip.close()\n    except Exception:\n        pass\n\n    return out\n\n\n# =========================\n# HELPERS\n# =========================\ndef build_textos_slides(include_title: bool, titulo: str, selected_pars: list[str]) -> list[str]:\n    textos_slides: list[str] = []\n    if include_title:\n        t = normalizar_texto(titulo)\n        if t:\n            textos_slides.extend(segmentar_para_slides(t, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))\n    for p in selected_pars:\n        p = normalizar_texto(p)\n        if p:\n            textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))\n    return [t for t in textos_slides if t.strip()]\n\n\n# =========================\n# STREAMLIT UI\n# =========================\nst.set_page_config(page_title=\"Video + Voz\", layout=\"wide\")\nst.title(\"Generador de Video con Narraci\u00f3n (ElevenLabs)\")\n\nrequire_pin_if_configured()\n\nwith st.sidebar:\n    st.header(\"ElevenLabs\")\n\n    secret_key = st.secrets.get(\"ELEVENLABS_API_KEY\", \"\")\n    use_secrets = st.checkbox(\"Usar API Key de Secrets\", value=bool(secret_key))\n    if use_secrets and secret_key:\n        api_key = secret_key\n        st.caption(\"Usando API Key desde Secrets.\")\n    else:\n        api_key = st.text_input(\"API Key\", type=\"password\")\n\n    model_id = st.selectbox(\n        \"Modelo\",\n        [\"eleven_multilingual_v2\", \"eleven_flash_v2_5\", \"eleven_turbo_v2_5\", \"eleven_v3\"],\n        index=0,\n    )\n\n    output_format = st.selectbox(\"Formato (MP3)\", [\"mp3_44100_128\", \"mp3_44100_192\"], index=0)\n\n    # \u2705 Voice ID en desplegable\n    voice_name = st.selectbox(\"Voz\", list(VOICE_OPTIONS.keys()), index=1)  # default JC News\n    voice_id_direct = VOICE_OPTIONS[voice_name]\n    st.caption(f\"voice_id = {voice"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "_id_direct}\")\n\n    st.subheader(\"Voice settings\")\n    stability = st.slider(\"stability\", 0.0, 1.0, 0.45, 0.01)\n    similarity = st.slider(\"similarity_boost\", 0.0, 1.0, 0.75, 0.01)\n    style = st.slider(\"style\", 0.0, 1.0, 0.20, 0.01)\n    speed = st.slider(\"speed\", 0.7, 1.3, 1.0, 0.01)\n    use_boost = st.checkbox(\"use_speaker_boost\", value=True)\n\nvoice_settings = {\n    \"stability\": stability,\n    \"similarity_boost\": similarity,\n    \"style\": style,\n    \"use_speaker_boost\": use_boost,\n    \"speed\": speed,\n}\n\nst.divider()\n\nmodo = st.radio(\n    \"\u00bfC\u00f3mo quieres ingresar el contenido?\",\n    [\"Desde URL de El Tiempo\", \"Texto e im\u00e1genes manual\"],\n    horizontal=True,\n)\n\noutput_mode = st.radio(\n    \"\u00bfC\u00f3mo quieres el video?\",\n    [\"Texto + Voz\", \"Solo Texto\", \"Solo Voz\", \"Solo Texto + M\u00fasica\"],\n    horizontal=True,\n)\n\nwant_voice = output_mode in (\"Texto + Voz\", \"Solo Voz\")\nwant_text = output_mode in (\"Texto + Voz\", \"Solo Texto\", \"Solo Texto + M\u00fasica\")\nwant_music_required = output_mode == \"Solo Texto + M\u00fasica\"\noverlay_text = want_text\n\nst.info(f\"\u2705 Requisito: m\u00ednimo {MIN_IMAGES_REQUIRED} im\u00e1genes para generar.\")\n\n\n# Estados\nif \"extracted\" not in st.session_state:\n    st.session_state.extracted = None\nif \"manual_paragraphs\" not in st.session_state:\n    st.session_state.manual_paragraphs = []\n\n\ndef run_generate(\n    *,\n    titulo_final: str,\n    textos_slides: list[str],\n    imagenes_paths: list[Path],\n    work_dir: Path,\n    cierre_path: Path | None,\n) -> Path:\n    texto_narracion = normalizar_texto(\" \".join(textos_slides))\n\n    # Voz\n    voice_path = None\n    if want_voice:\n        if not api_key:\n            raise ValueError(\"Falta API Key de ElevenLabs.\")\n        if not voice_id_direct:\n            raise ValueError(\"Voice ID inv\u00e1lido.\")\n        if not texto_narracion.strip():\n       "
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "     raise ValueError(\"No hay texto para narrar.\")\n        voice_path = eleven_tts_long_to_mp3(\n            text=texto_narracion,\n            api_key=api_key,\n            voice_id=voice_id_direct,\n            model_id=model_id,\n            output_format=output_format,\n            voice_settings=voice_settings,\n            out_mp3=work_dir / \"voice.mp3\",\n            work_dir=work_dir,\n        )\n\n    # M\u00fasica\n    music_path = None\n    if use_bgm:\n        if bgm_file is None:\n            raise ValueError(\"Seleccionaste un modo con m\u00fasica, pero no subiste archivo de m\u00fasica.\")\n        music_path = save_uploaded_audio(bgm_file, work_dir / \"audio\")\n        if not music_path or not music_path.exists():\n            raise ValueError(\"No pude guardar el archivo de m\u00fasica.\")\n\n    out_video = crear_video(\n        textos_slides=textos_slides,\n        imagenes=imagenes_paths,\n        titulo=titulo_final,\n        overlay_text=overlay_text,\n        voice_path=voice_path,\n        music_path=music_path,\n        voice_volume=voice_volume,\n        music_volume=music_volume,\n        music_fade=music_fade,\n        base_slide_duration=base_slide_duration,\n        fps=int(fps),\n        work_dir=work_dir,\n        cierre_video_path=cierre_path,\n    )\n    return out_video\n\n\n# =========================\n# MODO URL\n# =========================\nif modo == \"Desde URL de El Tiempo\":\n    url = st.text_input(\"URL del art\u00edculo\", placeholder=\"https://www.eltiempo.com/...\")\n    uploaded_extra = st.file_uploader(\n        \"Sube im\u00e1genes extra (opcional)\",\n        type=[\"jpg\", \"jpeg\", \"png\"],\n        accept_multiple_files=True,\n        key=\"url_extra_imgs\",\n    )\n\n    if st.button(\"1) Extraer contenido\", type=\"primary\", disabled=not bool(url)):\n        try:\n            with st.spinner(\"Extrayendo...\"):\n         "
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "       titulo, parrafos, img_urls = extraer_contenido_articulo(url)\n            st.session_state.extracted = {\"titulo\": titulo, \"parrafos\": parrafos, \"img_urls\": img_urls}\n            st.success(f\"Listo. P\u00e1rrafos: {len(parrafos)} | Im\u00e1genes encontradas: {len(img_urls)}\")\n        except Exception as e:\n            st.session_state.extracted = None\n            st.error(f\"No pude extraer: {e}\")\n\n    data = st.session_state.extracted\n\n    if data:\n        st.divider()\n        st.subheader(\"2) Selecciona y edita textos\")\n\n        include_title = st.checkbox(\"Incluir t\u00edtulo\", value=True, key=\"url_include_title\")\n        titulo_in = st.text_input(\"T\u00edtulo\", value=data[\"titulo\"], key=\"url_title\")\n\n        st.write(\"P\u00e1rrafos (marca los que quieres incluir):\")\n        selected_pars = []\n        for i, p in enumerate(data[\"parrafos\"]):\n            col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment=\"top\")\n            with col_chk:\n                ck = st.checkbox(\"Usar\", value=True, key=f\"url_par_ck_{i}\")\n            with col_txt:\n                txt = st.text_area(label=f\"P\u00e1rrafo {i+1}\", value=p, height=90, key=f\"url_par_txt_{i}\")\n            if ck:\n                selected_pars.append(txt)\n\n        st.divider()\n        st.divider()\n        st.subheader(\"Configuraci\u00f3n de Audio y Cierre\")\n\n        # M\u00fasica UI - URL Mode\n        st.markdown(\"#### M\u00fasica (Audio Network)\")\n        bgm_file = st.file_uploader(\n            \"Sube m\u00fasica de fondo (MP3/WAV)\",\n            type=[\"mp3\", \"wav\"],\n            accept_multiple_files=False,\n            key=\"bgm_upload_url\",\n        )\n\n        use_bgm = False\n        if want_music_required:\n            use_bgm = True\n            st.info(\"En **Solo Texto + M\u00fasica**, la m\u00fasica es obligatoria.\")\n        else:\n            if bgm_file is not N"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "one:\n                use_bgm = st.checkbox(\"Usar esta m\u00fasica como fondo\", value=False, key=\"use_bgm_url\")\n\n        c1, c2, c3 = st.columns(3)\n        with c1:\n            music_volume = st.slider(\"Volumen m\u00fasica\", 0.0, 1.0, 0.18, 0.01, key=\"mv_url\")\n        with c2:\n            voice_volume = st.slider(\"Volumen voz\", 0.0, 2.0, 1.0, 0.05, key=\"vv_url\")\n        with c3:\n            music_fade = st.slider(\"Fade m\u00fasica (seg)\", 0.0, 3.0, 1.0, 0.1, key=\"mf_url\")\n\n        c4, c5 = st.columns(2)\n        with c4:\n             fps = st.selectbox(\"FPS (rec. 15)\", [15, 24], index=0, key=\"fps_url\")\n        with c5:\n             base_slide_duration = st.slider(\"Dur. slide (sin voz)\", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key=\"bsd_url\")\n\n        # Cierre UI - URL Mode\n        st.markdown(\"#### Video de Cierre (opcional)\")\n        cierre_video_upload = st.file_uploader(\n            \"Video de cierre (opcional) - MP4/MOV/WEBM\",\n            type=[\"mp4\", \"mov\", \"webm\"],\n            accept_multiple_files=False,\n            key=\"cierre_video_url\",\n        )\n\n        st.subheader(\"3) Generar video\")\n\n        if st.button(\"Generar video\", type=\"primary\", key=\"url_generate\"):\n            if want_voice and not api_key:\n                st.error(\"Falta API Key de ElevenLabs.\")\n                st.stop()\n            if want_music_required and bgm_file is None:\n                st.error(\"En 'Solo Texto + M\u00fasica' debes subir m\u00fasica.\")\n                st.stop()\n            if include_title and not (titulo_in or \"\").strip():\n                st.error(\"Marcaste 'Incluir t\u00edtulo' pero el t\u00edtulo est\u00e1 vac\u00edo.\")\n                st.stop()\n            if not selected_pars and not include_title:\n                st.error(\"No hay textos seleccionados (ni t\u00edtulo ni p\u00e1rrafos).\")\n                st.stop()\n\n           "
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": " work_dir = Path(tempfile.mkdtemp(prefix=\"url_video_\"))\n            imgs_dir = work_dir / \"imgs\"\n            imgs_dir.mkdir(exist_ok=True)\n\n            progress = st.progress(0, text=\"Iniciando...\")\n            try:\n                progress.progress(10, text=\"Preparando textos (slides)...\")\n                titulo_final = normalizar_texto(titulo_in) if include_title else \"video\"\n                textos_slides = build_textos_slides(include_title, titulo_in, selected_pars)\n                if not textos_slides:\n                    raise ValueError(\"No quedaron textos para slides tras segmentar.\")\n\n                progress.progress(30, text=\"Descargando im\u00e1genes del art\u00edculo...\")\n                # descargamos todas las que podamos; el m\u00ednimo se valida despu\u00e9s\n                imgs = descargar_imagenes(data[\"img_urls\"], imgs_dir, max_workers=10)\n\n                if uploaded_extra:\n                    imgs.extend(guardar_imagenes_subidas(uploaded_extra, imgs_dir))\n\n                # \u2705 validar m\u00ednimo de im\u00e1genes\n                if len(imgs) < MIN_IMAGES_REQUIRED:\n                    st.error(f\"Necesitas m\u00ednimo {MIN_IMAGES_REQUIRED} im\u00e1genes. Actualmente tienes {len(imgs)}. Sube m\u00e1s fotos para continuar.\")\n                    st.stop()\n\n                cierre_path = save_uploaded_video(cierre_video_upload, work_dir / \"endclips\", \"cierre\")\n\n                progress.progress(60, text=\"Generando voz/m\u00fasica y renderizando video...\")\n                out_video = run_generate(\n                    titulo_final=titulo_final,\n                    textos_slides=textos_slides,\n                    imagenes_paths=imgs,\n                    work_dir=work_dir,\n                    cierre_path=cierre_path,\n                )\n\n                progress.progress(100, text=\"Listo \u2705\")\n                st.su"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "ccess(\"Video creado.\")\n                video_bytes = out_video.read_bytes()\n                st.video(video_bytes)\n                st.download_button(\"Descargar MP4\", data=video_bytes, file_name=out_video.name, mime=\"video/mp4\")\n\n            except Exception as e:\n                st.error(f\"Error: {e}\")\n            finally:\n                try:\n                    shutil.rmtree(work_dir, ignore_errors=True)\n                except Exception:\n                    pass\n    else:\n        st.info(\"Pega una URL y presiona **Extraer contenido** para empezar.\")\n\n\n# =========================\n# MODO MANUAL\n# =========================\nelse:\n    st.subheader(\"Texto e im\u00e1genes manual\")\n\n    colL, colR = st.columns([1, 1])\n    with colL:\n        include_title_m = st.checkbox(\"Incluir t\u00edtulo\", value=True, key=\"manual_include_title\")\n        titulo_m = st.text_input(\"T\u00edtulo\", value=\"\", key=\"manual_title\")\n    with colR:\n        uploaded_manual_imgs = st.file_uploader(\n            \"Sube im\u00e1genes (m\u00ednimo 5)\",\n            type=[\"jpg\", \"jpeg\", \"png\"],\n            accept_multiple_files=True,\n            key=\"manual_imgs\",\n        )\n\n    texto_manual = st.text_area(\n        \"Pega aqu\u00ed el texto completo (se separa por p\u00e1rrafos usando l\u00edneas en blanco)\",\n        height=220,\n        key=\"manual_text\",\n    )\n\n    if st.button(\"1) Cargar texto\", type=\"primary\", key=\"manual_load_text\"):\n        pars = split_paragraphs_from_manual(texto_manual)\n        st.session_state.manual_paragraphs = pars\n        st.success(f\"Texto cargado. P\u00e1rrafos detectados: {len(pars)}\")\n\n    if st.session_state.manual_paragraphs:\n        st.divider()\n        st.subheader(\"2) Selecciona y edita textos\")\n\n        selected_pars = []\n        for i, p in enumerate(st.session_state.manual_paragraphs):\n            col_chk, col_txt"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": " = st.columns([0.12, 0.88], vertical_alignment=\"top\")\n            with col_chk:\n                ck = st.checkbox(\"Usar\", value=True, key=f\"manual_par_ck_{i}\")\n            with col_txt:\n                txt = st.text_area(label=f\"P\u00e1rrafo {i+1}\", value=p, height=90, key=f\"manual_par_txt_{i}\")\n            if ck:\n                selected_pars.append(txt)\n\n        st.divider()\n        st.divider()\n        st.subheader(\"Configuraci\u00f3n de Audio y Cierre\")\n\n        # M\u00fasica UI - Manual Mode\n        st.markdown(\"#### M\u00fasica (Audio Network)\")\n        bgm_file = st.file_uploader(\n            \"Sube m\u00fasica de fondo (MP3/WAV)\",\n            type=[\"mp3\", \"wav\"],\n            accept_multiple_files=False,\n            key=\"bgm_upload_manual\",\n        )\n\n        use_bgm = False\n        if want_music_required:\n            use_bgm = True\n            st.info(\"En **Solo Texto + M\u00fasica**, la m\u00fasica es obligatoria.\")\n        else:\n            if bgm_file is not None:\n                use_bgm = st.checkbox(\"Usar esta m\u00fasica como fondo\", value=False, key=\"use_bgm_manual\")\n\n        c1, c2, c3 = st.columns(3)\n        with c1:\n            music_volume = st.slider(\"Volumen m\u00fasica\", 0.0, 1.0, 0.18, 0.01, key=\"mv_manual\")\n        with c2:\n            voice_volume = st.slider(\"Volumen voz\", 0.0, 2.0, 1.0, 0.05, key=\"vv_manual\")\n        with c3:\n            music_fade = st.slider(\"Fade m\u00fasica (seg)\", 0.0, 3.0, 1.0, 0.1, key=\"mf_manual\")\n\n        c4, c5 = st.columns(2)\n        with c4:\n             fps = st.selectbox(\"FPS (rec. 15)\", [15, 24], index=0, key=\"fps_manual\")\n        with c5:\n             base_slide_duration = st.slider(\"Dur. slide (sin voz)\", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key=\"bsd_manual\")\n\n        # Cierre UI - Manual Mode\n        st.markdown(\"#### Video de Cierre (opcional)\")\n        ci"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "erre_video_upload = st.file_uploader(\n            \"Video de cierre (opcional) - MP4/MOV/WEBM\",\n            type=[\"mp4\", \"mov\", \"webm\"],\n            accept_multiple_files=False,\n            key=\"cierre_video_manual\",\n        )\n\n        st.subheader(\"3) Generar video\")\n\n        if st.button(\"Generar video\", type=\"primary\", key=\"manual_generate\"):\n            if want_voice and not api_key:\n                st.error(\"Falta API Key de ElevenLabs.\")\n                st.stop()\n            if want_music_required and bgm_file is None:\n                st.error(\"En 'Solo Texto + M\u00fasica' debes subir m\u00fasica.\")\n                st.stop()\n            if include_title_m and not (titulo_m or \"\").strip():\n                st.error(\"Marcaste 'Incluir t\u00edtulo' pero el t\u00edtulo est\u00e1 vac\u00edo.\")\n                st.stop()\n            if not selected_pars and not include_title_m:\n                st.error(\"No hay textos seleccionados (ni t\u00edtulo ni p\u00e1rrafos).\")\n                st.stop()\n            if not uploaded_manual_imgs:\n                st.error(f\"En modo manual debes subir al menos {MIN_IMAGES_REQUIRED} im\u00e1genes.\")\n                st.stop()\n\n            work_dir = Path(tempfile.mkdtemp(prefix=\"manual_video_\"))\n            imgs_dir = work_dir / \"imgs\"\n            imgs_dir.mkdir(exist_ok=True)\n\n            progress = st.progress(0, text=\"Iniciando...\")\n            try:\n                progress.progress(10, text=\"Preparando textos (slides)...\")\n                titulo_final = normalizar_texto(titulo_m) if include_title_m else \"video\"\n                textos_slides = build_textos_slides(include_title_m, titulo_m, selected_pars)\n                if not textos_slides:\n                    raise ValueError(\"No quedaron textos para slides tras segmentar.\")\n\n                progress.progress(30, text=\"Guardando"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "object": "block",
+    "type": "code",
+    "code": {
+      "language": "python",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": " im\u00e1genes subidas...\")\n                imgs = guardar_imagenes_subidas(uploaded_manual_imgs, imgs_dir)\n\n                # \u2705 validar m\u00ednimo de im\u00e1genes\n                if len(imgs) < MIN_IMAGES_REQUIRED:\n                    st.error(f\"Necesitas m\u00ednimo {MIN_IMAGES_REQUIRED} im\u00e1genes. Actualmente tienes {len(imgs)}. Sube m\u00e1s fotos para continuar.\")\n                    st.stop()\n\n                cierre_path = save_uploaded_video(cierre_video_upload, work_dir / \"endclips\", \"cierre\")\n\n                progress.progress(60, text=\"Generando voz/m\u00fasica y renderizando video...\")\n                out_video = run_generate(\n                    titulo_final=titulo_final,\n                    textos_slides=textos_slides,\n                    imagenes_paths=imgs,\n                    work_dir=work_dir,\n                    cierre_path=cierre_path,\n                )\n\n                progress.progress(100, text=\"Listo \u2705\")\n                st.success(\"Video creado.\")\n                video_bytes = out_video.read_bytes()\n                st.video(video_bytes)\n                st.download_button(\"Descargar MP4\", data=video_bytes, file_name=out_video.name, mime=\"video/mp4\")\n\n            except Exception as e:\n                st.error(f\"Error: {e}\")\n            finally:\n                try:\n                    shutil.rmtree(work_dir, ignore_errors=True)\n                except Exception:\n                    pass\n    else:\n        st.info(\"Pega texto y presiona **Cargar texto** para generar los p\u00e1rrafos seleccionables.\")\n"
+          }
+        }
+      ]
+    }
+  }
+]

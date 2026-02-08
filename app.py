@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from dataclasses import dataclass
 
 # --- FIX Pillow>=10 (MoviePy usa Image.ANTIALIAS en algunas versiones) ---
 if not hasattr(Image, "ANTIALIAS"):
@@ -34,8 +35,45 @@ import imageio_ffmpeg
 
 
 # =========================
-# CONFIG
+# CONFIG & MODES
 # =========================
+@dataclass
+class VideoModeConfig:
+    name: str
+    width: int
+    height: int
+    max_chars: int
+    max_sentences: int
+    font_size: int
+    lines_per_image: int
+    wrap_width: int
+    is_vertical: bool
+
+CONFIG_HORIZONTAL = VideoModeConfig(
+    name="Horizontal (16:9)",
+    width=1920,
+    height=1080,
+    max_chars=60,
+    max_sentences=1,
+    font_size=55, # Increased slightly for readability
+    lines_per_image=2,
+    wrap_width=35,
+    is_vertical=False
+)
+
+CONFIG_VERTICAL = VideoModeConfig(
+    name="Vertical (9:16)",
+    width=1080,
+    height=1920,
+    max_chars=17,
+    max_sentences=1,
+    font_size=60,
+    lines_per_image=1,
+    wrap_width=15,
+    is_vertical=True
+)
+
+
 HEADERS_FAKE = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -46,21 +84,15 @@ HEADERS_FAKE = {
     "Referer": "https://www.eltiempo.com/",
 }
 
-RES_W, RES_H = 1920, 1080
 DEFAULT_FPS = 24
-
 DEFAULT_SLIDE_DURATION = 6.0
 MIN_SLIDE_DURATION_WITH_VOICE = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
 
-SLIDE_TEXT_MAX_CHARS = 60
-SLIDE_TEXT_MAX_SENTENCES = 1
+# Defaults if not specified (legacy support)
+DEFAULT_CONFIG = CONFIG_HORIZONTAL
 
-RENDER_WRAP_WIDTH = 30
-RENDER_LINES_PER_IMAGE = 2
-
-FONT_SIZE = 40
 
 # ✅ mínimo de imágenes
 MIN_IMAGES_REQUIRED = 5
@@ -320,10 +352,10 @@ def extraer_contenido_articulo(url: str) -> tuple[str, list[str], list[str]]:
 # =========================
 # IMAGES: download + render
 # =========================
-def ajustar_imagen(imagen: Image.Image) -> Image.Image:
+def ajustar_imagen(imagen: Image.Image, target_height: int) -> Image.Image:
     relacion = imagen.width / max(1, imagen.height)
-    nueva_w = int(RES_H * relacion)
-    return imagen.resize((nueva_w, RES_H), Image.LANCZOS)
+    nueva_w = int(target_height * relacion)
+    return imagen.resize((nueva_w, target_height), Image.LANCZOS)
 
 
 def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) -> list[Path]:
@@ -334,7 +366,9 @@ def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) ->
             resp = requests.get(u, headers=HEADERS_FAKE, timeout=20)
             resp.raise_for_status()
             img = Image.open(BytesIO(resp.content))
-            img = ajustar_imagen(img).convert("RGB")
+            # Ajuste genérico inicial, luego se refina en render_slide
+            # Usamos 1080 como base de altura mínima aceptable
+            img = ajustar_imagen(img, target_height=1080).convert("RGB")
             name = hashlib.md5(u.encode("utf-8")).hexdigest()
             p = out_dir / f"img_{name}.jpg"
             img.save(p, quality=92)
@@ -358,7 +392,8 @@ def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
     for uf in (uploaded_files or []):
         try:
             img = Image.open(BytesIO(uf.read()))
-            img = ajustar_imagen(img).convert("RGB")
+            # Igual, ajuste base
+            img = ajustar_imagen(img, target_height=1080).convert("RGB")
             safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", uf.name)
             pth = out_dir / f"upload_{safe_name}"
             img.save(pth, quality=92)
@@ -368,13 +403,53 @@ def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
     return paths
 
 
-def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:
+def render_slide(
+    imagen_path: Path, 
+    texto: str, 
+    idx: int, 
+    out_dir: Path, 
+    config: VideoModeConfig
+) -> list[Path]:
     imagen = Image.open(imagen_path).convert("RGB")
-    imagen = ajustar_imagen(imagen)
-
-    fondo = Image.new("RGB", (RES_W, RES_H), color="black")
-    pos = ((RES_W - imagen.width) // 2, (RES_H - imagen.height) // 2)
-    fondo.paste(imagen, pos)
+    
+    # --- LOGICA VERTICAL ---
+    if config.is_vertical:
+        # 1. Background: Blurred filling screen
+        bg_ratio = config.width / config.height
+        img_ratio = imagen.width / max(1, imagen.height)
+        
+        # Resize to cover
+        if img_ratio > bg_ratio:
+            # Mas ancha que el destino -> ajustar por altura
+            new_h = config.height
+            new_w = int(new_h * img_ratio)
+        else:
+            # Mas alta/angosta -> ajustar por ancho
+            new_w = config.width
+            new_h = int(new_w / img_ratio)
+            
+        fondo = imagen.resize((new_w, new_h), Image.LANCZOS)
+        # Crop center
+        left = (fondo.width - config.width) // 2
+        top = (fondo.height - config.height) // 2
+        fondo = fondo.crop((left, top, left + config.width, top + config.height))
+        fondo = fondo.filter(ImageFilter.GaussianBlur(radius=30))
+        
+        # 2. Foreground: Fit width (1080), center vertical
+        fg_w = config.width
+        fg_h = int(fg_w / img_ratio)
+        fg = imagen.resize((fg_w, fg_h), Image.LANCZOS)
+        
+        y_pos = (config.height - fg_h) // 2
+        fondo.paste(fg, (0, y_pos))
+        
+    # --- LOGICA HORIZONTAL ---
+    else:
+        # Codigo original adaptado
+        imagen = ajustar_imagen(imagen, target_height=config.height)
+        fondo = Image.new("RGB", (config.width, config.height), color="black")
+        pos = ((config.width - imagen.width) // 2, (config.height - imagen.height) // 2)
+        fondo.paste(imagen, pos)
 
     texto = (texto or "").strip()
     if not texto:
@@ -382,16 +457,20 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
         fondo.save(out, quality=92)
         return [out]
 
-    fuente = load_font(font_size)
+    fuente = load_font(config.font_size)
 
+    # Texto wrap
     lineas = textwrap.wrap(
         re.sub(r"\s+", " ", texto).strip(),
-        width=RENDER_WRAP_WIDTH,
+        width=config.wrap_width,
         break_long_words=False,
         break_on_hyphens=False,
     )
 
-    bloques = [lineas[i : i + RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]
+    # Si is_vertical y excedemos 1 linea, igual intentamos renderizar,
+    # aunque segmentar_para_slides deberia haberlo prevenido.
+    
+    bloques = [lineas[i : i + config.lines_per_image] for i in range(0, len(lineas), config.lines_per_image)]
     outs = []
 
     for j, bloque in enumerate(bloques):
@@ -404,14 +483,33 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
             heights.append(bbox[3] - bbox[1])
 
         total_h = sum(heights) + 10 * (len(bloque) - 1)
-        y0 = RES_H - total_h - 110
-        y = y0
+        
+        if config.is_vertical:
+            # Tercio inferior
+            # Inicio del tercio inferior:
+            y_start_zone = config.height * 2 / 3
+            # Centrado dentro del tercio inferior? O starting at top of bottom third?
+            # User: "centrado a un tercio inferior del total del alto"
+            # Interpetracion: El centro del bloque de texto debe estar en el centro del tercio inferior.
+            # Centro del tercio inferior = 2/3 H + (1/3 H)/2 = 5/6 H.
+            
+            center_y = config.height * 5 / 6
+            y0 = center_y - (total_h / 2)
+        else:
+            # Original logic: bottom area
+            y0 = config.height - total_h - 110
 
+        y = y0
+        
         for linea, h in zip(bloque, heights):
             bbox = d.textbbox((0, 0), linea, font=fuente)
             w = bbox[2] - bbox[0]
-            x = (RES_W - w) // 2
+            if config.is_vertical:
+                x = (config.width - w) // 2
+            else:
+                x = (config.width - w) // 2
 
+            # Sombra / Borde
             d.text(
                 (x, y),
                 linea,
@@ -604,16 +702,19 @@ def build_final_audio_clip(
 # =========================
 # END CLIP (CIERRE) + FIT TO 1080P
 # =========================
-def fit_clip_to_1080p(clip: VideoFileClip) -> VideoFileClip:
-    c = clip.resize(height=RES_H)
-    if c.w > RES_W:
-        x1 = (c.w - RES_W) / 2
-        x2 = x1 + RES_W
+def fit_clip_to_config(clip: VideoFileClip, config: VideoModeConfig) -> VideoFileClip:
+    # Resize manteniendo aspect ratio para cubrir o ajustar según necesidad
+    # Para Horizontal (CIERRE) solemos querer que ocupe todo
+    c = clip.resize(height=config.height)
+    if c.w > config.width:
+        x1 = (c.w - config.width) / 2
+        x2 = x1 + config.width
         c = c.crop(x1=x1, x2=x2)
-    elif c.w < RES_W:
-        c = c.on_color(size=(RES_W, RES_H), color=(0, 0, 0), pos=("center", "center"))
-    if c.h != RES_H:
-        c = c.resize(height=RES_H)
+    elif c.w < config.width:
+        c = c.on_color(size=(config.width, config.height), color=(0, 0, 0), pos=("center", "center"))
+    
+    if c.h != config.height:
+        c = c.resize(height=config.height)
     return c
 
 
@@ -689,6 +790,7 @@ def crear_video(
     fps: int,
     work_dir: Path,
     cierre_video_path: Path | None,
+    config: VideoModeConfig,
 ) -> Path:
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
@@ -697,7 +799,7 @@ def crear_video(
     slide_imgs: list[Path] = []
     for idx, txt in enumerate(textos_slides):
         img_path = imagenes[idx % len(imagenes)]
-        slide_imgs.extend(render_slide(img_path, txt if overlay_text else "", idx, slides_dir, font_size=FONT_SIZE))
+        slide_imgs.extend(render_slide(img_path, txt if overlay_text else "", idx, slides_dir, config=config))
 
     if not slide_imgs:
         raise ValueError("No se generaron slides (slide_imgs vacío).")
@@ -731,16 +833,18 @@ def crear_video(
     else:
         main_video = main_video.set_duration(main_duration)
 
-
-
-    # 6) Append CIERRE (sin logo)
+    # 6) Append CIERRE (solo si aplica)
+    # En modo vertical, el usuario pidió NO cierre. Podemos enforcear eso aquí o en UI.
+    # Si config.is_vertical, ignoramos cierre_video_path
+    
     final_clips = [main_video]
     cierre_clip = None
 
-    if cierre_video_path and cierre_video_path.exists():
-        cierre_clip = VideoFileClip(str(cierre_video_path))
-        cierre_clip = fit_clip_to_1080p(cierre_clip)
-        final_clips.append(cierre_clip)
+    if not config.is_vertical: # SOLO HORIZONTAL SOPORTA CIERRE POR AHORA (SEGUN REQ)
+        if cierre_video_path and cierre_video_path.exists():
+            cierre_clip = VideoFileClip(str(cierre_video_path))
+            cierre_clip = fit_clip_to_config(cierre_clip, config)
+            final_clips.append(cierre_clip)
 
     final = concatenate_videoclips(final_clips, method="compose")
 
@@ -790,16 +894,16 @@ def crear_video(
 # =========================
 # HELPERS
 # =========================
-def build_textos_slides(include_title: bool, titulo: str, selected_pars: list[str]) -> list[str]:
+def build_textos_slides(include_title: bool, titulo: str, selected_pars: list[str], config: VideoModeConfig) -> list[str]:
     textos_slides: list[str] = []
     if include_title:
         t = normalizar_texto(titulo)
         if t:
-            textos_slides.extend(segmentar_para_slides(t, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+            textos_slides.extend(segmentar_para_slides(t, config.max_chars, config.max_sentences))
     for p in selected_pars:
         p = normalizar_texto(p)
         if p:
-            textos_slides.extend(segmentar_para_slides(p, SLIDE_TEXT_MAX_CHARS, SLIDE_TEXT_MAX_SENTENCES))
+            textos_slides.extend(segmentar_para_slides(p, config.max_chars, config.max_sentences))
     return [t for t in textos_slides if t.strip()]
 
 
@@ -852,11 +956,26 @@ voice_settings = {
 
 st.divider()
 
-modo = st.radio(
-    "¿Cómo quieres ingresar el contenido?",
-    ["Desde URL de El Tiempo", "Texto e imágenes manual"],
-    horizontal=True,
-)
+col_config_1, col_config_2 = st.columns(2)
+
+with col_config_1:
+    modo = st.radio(
+        "¿Cómo quieres ingresar el contenido?",
+        ["Desde URL de El Tiempo", "Texto e imágenes manual"],
+        horizontal=True,
+    )
+
+with col_config_2:
+    orientacion_sel = st.radio(
+        "Orientación de Video",
+        ["Horizontal (16:9)", "Vertical (9:16)"],
+        horizontal=True
+    )
+
+if "Vertical" in orientacion_sel:
+    current_config = CONFIG_VERTICAL
+else:
+    current_config = CONFIG_HORIZONTAL
 
 output_mode = st.radio(
     "¿Cómo quieres el video?",
@@ -886,6 +1005,7 @@ def run_generate(
     imagenes_paths: list[Path],
     work_dir: Path,
     cierre_path: Path | None,
+    config: VideoModeConfig,
 ) -> Path:
     texto_narracion = normalizar_texto(" ".join(textos_slides))
 
@@ -932,6 +1052,7 @@ def run_generate(
         fps=int(fps),
         work_dir=work_dir,
         cierre_video_path=cierre_path,
+        config=config,
     )
     return out_video
 
@@ -1014,13 +1135,17 @@ if modo == "Desde URL de El Tiempo":
              base_slide_duration = st.slider("Dur. slide (sin voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key="bsd_url")
 
         # Cierre UI - URL Mode
-        st.markdown("#### Video de Cierre (opcional)")
-        cierre_video_upload = st.file_uploader(
-            "Video de cierre (opcional) - MP4/MOV/WEBM",
-            type=["mp4", "mov", "webm"],
-            accept_multiple_files=False,
-            key="cierre_video_url",
-        )
+        cierre_video_upload = None
+        if not current_config.is_vertical:
+            st.markdown("#### Video de Cierre (opcional)")
+            cierre_video_upload = st.file_uploader(
+                "Video de cierre (opcional) - MP4/MOV/WEBM",
+                type=["mp4", "mov", "webm"],
+                accept_multiple_files=False,
+                key="cierre_video_url",
+            )
+        else:
+            st.info("ℹ️ El video de cierre no está disponible en formato Vertical.")
 
         st.subheader("3) Generar video")
 
@@ -1046,7 +1171,7 @@ if modo == "Desde URL de El Tiempo":
             try:
                 progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_in) if include_title else "video"
-                textos_slides = build_textos_slides(include_title, titulo_in, selected_pars)
+                textos_slides = build_textos_slides(include_title, titulo_in, selected_pars, config=current_config)
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
@@ -1071,6 +1196,7 @@ if modo == "Desde URL de El Tiempo":
                     imagenes_paths=imgs,
                     work_dir=work_dir,
                     cierre_path=cierre_path,
+                    config=current_config,
                 )
 
                 progress.progress(100, text="Listo ✅")
@@ -1169,13 +1295,17 @@ else:
              base_slide_duration = st.slider("Dur. slide (sin voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key="bsd_manual")
 
         # Cierre UI - Manual Mode
-        st.markdown("#### Video de Cierre (opcional)")
-        cierre_video_upload = st.file_uploader(
-            "Video de cierre (opcional) - MP4/MOV/WEBM",
-            type=["mp4", "mov", "webm"],
-            accept_multiple_files=False,
-            key="cierre_video_manual",
-        )
+        cierre_video_upload = None
+        if not current_config.is_vertical:
+            st.markdown("#### Video de Cierre (opcional)")
+            cierre_video_upload = st.file_uploader(
+                "Video de cierre (opcional) - MP4/MOV/WEBM",
+                type=["mp4", "mov", "webm"],
+                accept_multiple_files=False,
+                key="cierre_video_manual",
+            )
+        else:
+            st.info("ℹ️ El video de cierre no está disponible en formato Vertical.")
 
         st.subheader("3) Generar video")
 
@@ -1204,7 +1334,7 @@ else:
             try:
                 progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_m) if include_title_m else "video"
-                textos_slides = build_textos_slides(include_title_m, titulo_m, selected_pars)
+                textos_slides = build_textos_slides(include_title_m, titulo_m, selected_pars, config=current_config)
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
@@ -1225,6 +1355,7 @@ else:
                     imagenes_paths=imgs,
                     work_dir=work_dir,
                     cierre_path=cierre_path,
+                    config=current_config,
                 )
 
                 progress.progress(100, text="Listo ✅")
