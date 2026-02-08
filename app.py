@@ -672,45 +672,7 @@ def get_audio_duration(path: Path) -> float | None:
             pass
 
 
-def add_logo_overlay(main_clip, logo_png_path: Path, position: str, scale: float, margin: int):
-    """
-    Overlay PNG con transparencia sobre el video principal.
-    Si el PNG ya es 1920x1080 (o coincide con el video), NO se escala.
-    Se aplica SOLO al main_clip (no al cierre).
-    """
-    if not logo_png_path or not logo_png_path.exists():
-        return main_clip
 
-    # Leemos tamaño real del PNG
-    try:
-        with Image.open(logo_png_path) as im:
-            lw, lh = im.size
-    except Exception:
-        lw, lh = (0, 0)
-
-    logo = ImageClip(str(logo_png_path)).set_duration(main_clip.duration)
-
-    # Si el overlay ya es del tamaño del video, NO lo alteramos
-    if lw == main_clip.w and lh == main_clip.h:
-        logo = logo.set_position((0, 0))
-        return CompositeVideoClip([main_clip, logo], size=(main_clip.w, main_clip.h))
-
-    # Si no coincide, entonces sí aplicamos escala + posición con margen
-    logo = logo.resize(scale)
-
-    def pos_func(t):
-        if position == "top-left":
-            return (margin, margin)
-        if position == "top-right":
-            return (main_clip.w - logo.w - margin, margin)
-        if position == "bottom-left":
-            return (margin, main_clip.h - logo.h - margin)
-        if position == "bottom-right":
-            return (main_clip.w - logo.w - margin, main_clip.h - logo.h - margin)
-        return (main_clip.w - logo.w - margin, margin)
-
-    logo = logo.set_position(pos_func)
-    return CompositeVideoClip([main_clip, logo], size=(main_clip.w, main_clip.h))
 
 
 def crear_video(
@@ -727,10 +689,6 @@ def crear_video(
     fps: int,
     work_dir: Path,
     cierre_video_path: Path | None,
-    logo_png_path: Path | None,
-    logo_position: str,
-    logo_scale: float,
-    logo_margin: int,
 ) -> Path:
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
@@ -773,15 +731,7 @@ def crear_video(
     else:
         main_video = main_video.set_duration(main_duration)
 
-    # 5) Logo overlay SOLO en el video principal (hasta antes del cierre)
-    if logo_png_path and logo_png_path.exists():
-        main_video = add_logo_overlay(
-            main_video,
-            logo_png_path=logo_png_path,
-            position=logo_position,
-            scale=logo_scale,
-            margin=logo_margin,
-        )
+
 
     # 6) Append CIERRE (sin logo)
     final_clips = [main_video]
@@ -919,52 +869,6 @@ want_text = output_mode in ("Texto + Voz", "Solo Texto", "Solo Texto + Música")
 want_music_required = output_mode == "Solo Texto + Música"
 overlay_text = want_text
 
-# Música
-st.subheader("Música (Audio Network)")
-bgm_file = st.file_uploader(
-    "Sube música de fondo (MP3/WAV)",
-    type=["mp3", "wav"],
-    accept_multiple_files=False,
-    key="bgm_upload",
-)
-
-use_bgm = False
-if want_music_required:
-    use_bgm = True
-    st.info("En **Solo Texto + Música**, la música es obligatoria.")
-else:
-    if bgm_file is not None:
-        use_bgm = st.checkbox("Usar esta música como fondo", value=False, key="use_bgm_checkbox")
-
-music_volume = st.slider("Volumen música", 0.0, 1.0, 0.18, 0.01)
-voice_volume = st.slider("Volumen voz", 0.0, 2.0, 1.0, 0.05)
-music_fade = st.slider("Fade música (seg)", 0.0, 3.0, 1.0, 0.1)
-
-fps = st.selectbox("FPS (recomendado 15 en Streamlit Cloud)", [15, 24], index=0)
-base_slide_duration = st.slider("Duración base por slide (si NO hay voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5)
-
-# ✅ Cierre (un solo archivo)
-st.subheader("Cierre (opcional)")
-cierre_video_upload = st.file_uploader(
-    "Video de cierre (opcional) - MP4/MOV/WEBM",
-    type=["mp4", "mov", "webm"],
-    accept_multiple_files=False,
-    key="cierre_video",
-)
-
-# ✅ Mosca/logo overlay
-st.subheader("Mosca / Logo (opcional)")
-logo_png_upload = st.file_uploader(
-    "Sube logo PNG transparente (opcional)",
-    type=["png"],
-    accept_multiple_files=False,
-    key="logo_png",
-)
-
-logo_position = st.selectbox("Posición del logo", ["top-right", "top-left", "bottom-right", "bottom-left"], index=0)
-logo_scale = st.slider("Tamaño del logo (escala)", 0.05, 0.60, 0.18, 0.01)
-logo_margin = st.slider("Margen del logo (px)", 0, 80, 24, 1)
-
 st.info(f"✅ Requisito: mínimo {MIN_IMAGES_REQUIRED} imágenes para generar.")
 
 
@@ -982,7 +886,6 @@ def run_generate(
     imagenes_paths: list[Path],
     work_dir: Path,
     cierre_path: Path | None,
-    logo_path: Path | None,
 ) -> Path:
     texto_narracion = normalizar_texto(" ".join(textos_slides))
 
@@ -1029,10 +932,6 @@ def run_generate(
         fps=int(fps),
         work_dir=work_dir,
         cierre_video_path=cierre_path,
-        logo_png_path=logo_path,
-        logo_position=logo_position,
-        logo_scale=logo_scale,
-        logo_margin=logo_margin,
     )
     return out_video
 
@@ -1080,6 +979,49 @@ if modo == "Desde URL de El Tiempo":
                 selected_pars.append(txt)
 
         st.divider()
+        st.divider()
+        st.subheader("Configuración de Audio y Cierre")
+
+        # Música UI - URL Mode
+        st.markdown("#### Música (Audio Network)")
+        bgm_file = st.file_uploader(
+            "Sube música de fondo (MP3/WAV)",
+            type=["mp3", "wav"],
+            accept_multiple_files=False,
+            key="bgm_upload_url",
+        )
+
+        use_bgm = False
+        if want_music_required:
+            use_bgm = True
+            st.info("En **Solo Texto + Música**, la música es obligatoria.")
+        else:
+            if bgm_file is not None:
+                use_bgm = st.checkbox("Usar esta música como fondo", value=False, key="use_bgm_url")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            music_volume = st.slider("Volumen música", 0.0, 1.0, 0.18, 0.01, key="mv_url")
+        with c2:
+            voice_volume = st.slider("Volumen voz", 0.0, 2.0, 1.0, 0.05, key="vv_url")
+        with c3:
+            music_fade = st.slider("Fade música (seg)", 0.0, 3.0, 1.0, 0.1, key="mf_url")
+
+        c4, c5 = st.columns(2)
+        with c4:
+             fps = st.selectbox("FPS (rec. 15)", [15, 24], index=0, key="fps_url")
+        with c5:
+             base_slide_duration = st.slider("Dur. slide (sin voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key="bsd_url")
+
+        # Cierre UI - URL Mode
+        st.markdown("#### Video de Cierre (opcional)")
+        cierre_video_upload = st.file_uploader(
+            "Video de cierre (opcional) - MP4/MOV/WEBM",
+            type=["mp4", "mov", "webm"],
+            accept_multiple_files=False,
+            key="cierre_video_url",
+        )
+
         st.subheader("3) Generar video")
 
         if st.button("Generar video", type="primary", key="url_generate"):
@@ -1121,7 +1063,6 @@ if modo == "Desde URL de El Tiempo":
                     st.stop()
 
                 cierre_path = save_uploaded_video(cierre_video_upload, work_dir / "endclips", "cierre")
-                logo_path = save_uploaded_png(logo_png_upload, work_dir / "overlay", "logo") if logo_png_upload else None
 
                 progress.progress(60, text="Generando voz/música y renderizando video...")
                 out_video = run_generate(
@@ -1130,7 +1071,6 @@ if modo == "Desde URL de El Tiempo":
                     imagenes_paths=imgs,
                     work_dir=work_dir,
                     cierre_path=cierre_path,
-                    logo_path=logo_path,
                 )
 
                 progress.progress(100, text="Listo ✅")
@@ -1194,6 +1134,49 @@ else:
                 selected_pars.append(txt)
 
         st.divider()
+        st.divider()
+        st.subheader("Configuración de Audio y Cierre")
+
+        # Música UI - Manual Mode
+        st.markdown("#### Música (Audio Network)")
+        bgm_file = st.file_uploader(
+            "Sube música de fondo (MP3/WAV)",
+            type=["mp3", "wav"],
+            accept_multiple_files=False,
+            key="bgm_upload_manual",
+        )
+
+        use_bgm = False
+        if want_music_required:
+            use_bgm = True
+            st.info("En **Solo Texto + Música**, la música es obligatoria.")
+        else:
+            if bgm_file is not None:
+                use_bgm = st.checkbox("Usar esta música como fondo", value=False, key="use_bgm_manual")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            music_volume = st.slider("Volumen música", 0.0, 1.0, 0.18, 0.01, key="mv_manual")
+        with c2:
+            voice_volume = st.slider("Volumen voz", 0.0, 2.0, 1.0, 0.05, key="vv_manual")
+        with c3:
+            music_fade = st.slider("Fade música (seg)", 0.0, 3.0, 1.0, 0.1, key="mf_manual")
+
+        c4, c5 = st.columns(2)
+        with c4:
+             fps = st.selectbox("FPS (rec. 15)", [15, 24], index=0, key="fps_manual")
+        with c5:
+             base_slide_duration = st.slider("Dur. slide (sin voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key="bsd_manual")
+
+        # Cierre UI - Manual Mode
+        st.markdown("#### Video de Cierre (opcional)")
+        cierre_video_upload = st.file_uploader(
+            "Video de cierre (opcional) - MP4/MOV/WEBM",
+            type=["mp4", "mov", "webm"],
+            accept_multiple_files=False,
+            key="cierre_video_manual",
+        )
+
         st.subheader("3) Generar video")
 
         if st.button("Generar video", type="primary", key="manual_generate"):
@@ -1234,7 +1217,6 @@ else:
                     st.stop()
 
                 cierre_path = save_uploaded_video(cierre_video_upload, work_dir / "endclips", "cierre")
-                logo_path = save_uploaded_png(logo_png_upload, work_dir / "overlay", "logo") if logo_png_upload else None
 
                 progress.progress(60, text="Generando voz/música y renderizando video...")
                 out_video = run_generate(
@@ -1243,7 +1225,6 @@ else:
                     imagenes_paths=imgs,
                     work_dir=work_dir,
                     cierre_path=cierre_path,
-                    logo_path=logo_path,
                 )
 
                 progress.progress(100, text="Listo ✅")
