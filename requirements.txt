@@ -1,7 +1,6 @@
 streamlit
 pandas
-pillow
-moviepy==1.0.3,<2
+moviepy>=1.0.3,<2
 toml
 requests>=2.31
 beautifulsoup4>=4.12
