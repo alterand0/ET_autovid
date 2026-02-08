@@ -996,6 +996,10 @@ if "extracted" not in st.session_state:
     st.session_state.extracted = None
 if "manual_paragraphs" not in st.session_state:
     st.session_state.manual_paragraphs = []
+if "url_downloaded_images" not in st.session_state:
+    st.session_state.url_downloaded_images = []
+if "manual_uploaded_images" not in st.session_state:
+    st.session_state.manual_uploaded_images = []
 
 
 def run_generate(
@@ -1073,10 +1077,20 @@ if modo == "Desde URL de El Tiempo":
         try:
             with st.spinner("Extrayendo..."):
                 titulo, parrafos, img_urls = extraer_contenido_articulo(url)
+            
+            # Descargar imágenes inmediatamente para mostrar preview
+            temp_dir = Path(tempfile.mkdtemp(prefix="preview_imgs_"))
+            with st.spinner("Descargando imágenes..."):
+                downloaded = descargar_imagenes(img_urls, temp_dir, max_workers=10)
+                if uploaded_extra:
+                    downloaded.extend(guardar_imagenes_subidas(uploaded_extra, temp_dir))
+            
             st.session_state.extracted = {"titulo": titulo, "parrafos": parrafos, "img_urls": img_urls}
-            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes encontradas: {len(img_urls)}")
+            st.session_state.url_downloaded_images = downloaded
+            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes descargadas: {len(downloaded)}")
         except Exception as e:
             st.session_state.extracted = None
+            st.session_state.url_downloaded_images = []
             st.error(f"No pude extraer: {e}")
 
     data = st.session_state.extracted
@@ -1099,8 +1113,40 @@ if modo == "Desde URL de El Tiempo":
             if ck:
                 selected_pars.append(txt)
 
+
         st.divider()
+        
+        # Image Selection UI - URL Mode
+        st.subheader("2.5) Selecciona imágenes")
+        
+        all_imgs = st.session_state.url_downloaded_images
+        if all_imgs:
+            st.write(f"Imágenes disponibles ({len(all_imgs)}):")
+            selected_imgs = []
+            
+            # Display images in rows of 3
+            cols_per_row = 3
+            for i in range(0, len(all_imgs), cols_per_row):
+                row_imgs = all_imgs[i:i+cols_per_row]
+                cols = st.columns(cols_per_row)
+                
+                for j, img_path in enumerate(row_imgs):
+                    img_idx = i + j
+                    with cols[j]:
+                        st.image(str(img_path), use_container_width=True, caption=f"Imagen {img_idx+1}")
+                        use_img = st.checkbox(
+                            f"Usar imagen {img_idx+1}", 
+                            value=True, 
+                            key=f"url_img_ck_{img_idx}"
+                        )
+                        if use_img:
+                            selected_imgs.append(img_path)
+        else:
+            st.info("No hay imágenes descargadas. Ejecuta 'Extraer contenido' primero.")
+            selected_imgs = []
+        
         st.divider()
+
         st.subheader("Configuración de Audio y Cierre")
 
         # Música UI - URL Mode
@@ -1175,17 +1221,23 @@ if modo == "Desde URL de El Tiempo":
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
-                progress.progress(30, text="Descargando imágenes del artículo...")
-                # descargamos todas las que podamos; el mínimo se valida después
-                imgs = descargar_imagenes(data["img_urls"], imgs_dir, max_workers=10)
-
-                if uploaded_extra:
-                    imgs.extend(guardar_imagenes_subidas(uploaded_extra, imgs_dir))
-
-                # ✅ validar mínimo de imágenes
-                if len(imgs) < MIN_IMAGES_REQUIRED:
-                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente tienes {len(imgs)}. Sube más fotos para continuar.")
+                progress.progress(30, text="Preparando imágenes seleccionadas...")
+                # Usar imágenes seleccionadas en lugar de descargar nuevamente
+                if not selected_imgs:
+                    st.error("No has seleccionado ninguna imagen.")
                     st.stop()
+                
+                # ✅ validar mínimo de imágenes
+                if len(selected_imgs) < MIN_IMAGES_REQUIRED:
+                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente seleccionaste {len(selected_imgs)}. Selecciona más imágenes.")
+                    st.stop()
+                
+                # Copiar imágenes seleccionadas al directorio de trabajo
+                imgs = []
+                for img_src in selected_imgs:
+                    img_dst = imgs_dir / img_src.name
+                    shutil.copy(img_src, img_dst)
+                    imgs.append(img_dst)
 
                 cierre_path = save_uploaded_video(cierre_video_upload, work_dir / "endclips", "cierre")
 
@@ -1243,7 +1295,16 @@ else:
     if st.button("1) Cargar texto", type="primary", key="manual_load_text"):
         pars = split_paragraphs_from_manual(texto_manual)
         st.session_state.manual_paragraphs = pars
-        st.success(f"Texto cargado. Párrafos detectados: {len(pars)}")
+        
+        # Guardar imágenes uploaded inmediatamente para preview
+        if uploaded_manual_imgs:
+            temp_dir = Path(tempfile.mkdtemp(prefix="manual_preview_imgs_"))
+            saved_imgs = guardar_imagenes_subidas(uploaded_manual_imgs, temp_dir)
+            st.session_state.manual_uploaded_images = saved_imgs
+            st.success(f"Texto cargado. Párrafos detectados: {len(pars)} | Imágenes: {len(saved_imgs)}")
+        else:
+            st.session_state.manual_uploaded_images = []
+            st.success(f"Texto cargado. Párrafos detectados: {len(pars)}")
 
     if st.session_state.manual_paragraphs:
         st.divider()
@@ -1260,7 +1321,38 @@ else:
                 selected_pars.append(txt)
 
         st.divider()
+        
+        # Image Selection UI - Manual Mode
+        st.subheader("2.5) Selecciona imágenes")
+        
+        all_imgs = st.session_state.manual_uploaded_images
+        if all_imgs:
+            st.write(f"Imágenes disponibles ({len(all_imgs)}):")
+            selected_imgs = []
+            
+            # Display images in rows of 3
+            cols_per_row = 3
+            for i in range(0, len(all_imgs), cols_per_row):
+                row_imgs = all_imgs[i:i+cols_per_row]
+                cols = st.columns(cols_per_row)
+                
+                for j, img_path in enumerate(row_imgs):
+                    img_idx = i + j
+                    with cols[j]:
+                        st.image(str(img_path), use_container_width=True, caption=f"Imagen {img_idx+1}")
+                        use_img = st.checkbox(
+                            f"Usar imagen {img_idx+1}", 
+                            value=True, 
+                            key=f"manual_img_ck_{img_idx}"
+                        )
+                        if use_img:
+                            selected_imgs.append(img_path)
+        else:
+            st.info("No hay imágenes cargadas. Sube imágenes y presiona 'Cargar texto'.")
+            selected_imgs = []
+        
         st.divider()
+
         st.subheader("Configuración de Audio y Cierre")
 
         # Música UI - Manual Mode
@@ -1338,13 +1430,23 @@ else:
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
-                progress.progress(30, text="Guardando imágenes subidas...")
-                imgs = guardar_imagenes_subidas(uploaded_manual_imgs, imgs_dir)
-
-                # ✅ validar mínimo de imágenes
-                if len(imgs) < MIN_IMAGES_REQUIRED:
-                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente tienes {len(imgs)}. Sube más fotos para continuar.")
+                progress.progress(30, text="Preparando imágenes seleccionadas...")
+                # Usar imágenes seleccionadas en lugar de todas las subidas
+                if not selected_imgs:
+                    st.error("No has seleccionado ninguna imagen.")
                     st.stop()
+                
+                # ✅ validar mínimo de imágenes
+                if len(selected_imgs) < MIN_IMAGES_REQUIRED:
+                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente seleccionaste {len(selected_imgs)}. Selecciona más imágenes.")
+                    st.stop()
+                
+                # Copiar imágenes seleccionadas al directorio de trabajo
+                imgs = []
+                for img_src in selected_imgs:
+                    img_dst = imgs_dir / img_src.name
+                    shutil.copy(img_src, img_dst)
+                    imgs.append(img_dst)
 
                 cierre_path = save_uploaded_video(cierre_video_upload, work_dir / "endclips", "cierre")
 
