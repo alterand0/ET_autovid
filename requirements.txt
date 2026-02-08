@@ -1,11 +1,12 @@
 streamlit
 pandas
 pillow
-moviepy>=1.0.3
+moviepy==1.0.3,<2
 toml
 requests>=2.31
 beautifulsoup4>=4.12
 pillow>=10.0
-imageio-ffmpeg>=0.4.9
+imageio
+imageio-ffmpeg
 tqdm>=4.66
 numpy>=1.26
