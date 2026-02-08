@@ -1133,7 +1133,7 @@ if modo == "Desde URL de El Tiempo":
                 for j, img_path in enumerate(row_imgs):
                     img_idx = i + j
                     with cols[j]:
-                        st.image(str(img_path), use_container_width=True, caption=f"Imagen {img_idx+1}")
+                        st.image(str(img_path), width='stretch', caption=f"Imagen {img_idx+1}")
                         use_img = st.checkbox(
                             f"Usar imagen {img_idx+1}", 
                             value=True, 
@@ -1339,7 +1339,7 @@ else:
                 for j, img_path in enumerate(row_imgs):
                     img_idx = i + j
                     with cols[j]:
-                        st.image(str(img_path), use_container_width=True, caption=f"Imagen {img_idx+1}")
+                        st.image(str(img_path), width='stretch', caption=f"Imagen {img_idx+1}")
                         use_img = st.checkbox(
                             f"Usar imagen {img_idx+1}", 
                             value=True, 
