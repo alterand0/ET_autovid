@@ -425,77 +425,45 @@ def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
 
 
 def render_slide(
-    imagen_path: Path, 
-    texto: str, 
-    idx: int, 
-    out_dir: Path, 
-    config: VideoModeConfig
+    imagen_path: Path,
+    texto: str,
+    idx: int,
+    out_dir: Path,
+    config: VideoModeConfig,
 ) -> list[Path]:
-    imagen = Image.open(imagen_path).convert("RGB")
-    
-    # --- LOGICA VERTICAL ---
-    if config.is_vertical:
-        # 1. Background: Blurred filling screen
-        bg_ratio = config.width / config.height
-        img_ratio = imagen.width / max(1, imagen.height)
-        
-        # Resize to cover
-        if img_ratio > bg_ratio:
-            # Mas ancha que el destino -> ajustar por altura
-            new_h = config.height
-            new_w = int(new_h * img_ratio)
-        else:
-            # Mas alta/angosta -> ajustar por ancho
-            new_w = config.width
-            new_h = int(new_w / img_ratio)
-            
-        fondo = imagen.resize((new_w, new_h), Image.LANCZOS)
-        # Crop center
-        left = (fondo.width - config.width) // 2
-        top = (fondo.height - config.height) // 2
-        fondo = fondo.crop((left, top, left + config.width, top + config.height))
-        fondo = fondo.filter(ImageFilter.GaussianBlur(radius=30))
-        
-        # 2. Foreground: Fit width (1080), center vertical
-        fg_w = config.width
-        fg_h = int(fg_w / img_ratio)
-        fg = imagen.resize((fg_w, fg_h), Image.LANCZOS)
-        
-        y_pos = (config.height - fg_h) // 2
-        fondo.paste(fg, (0, y_pos))
-        
-    # --- LOGICA HORIZONTAL ---
-    else:
-        # Codigo original adaptado
-    
-        
-def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    RES_W, RES_H = config.width, config.height
+    FONT_SIZE = config.font_size
+    RENDER_WRAP_WIDTH = config.wrap_width
+    RENDER_LINES_PER_IMAGE = config.lines_per_image
+
     imagen = Image.open(imagen_path).convert("RGB")
 
-    # 1) Fondo: misma imagen en modo "cover" + blur
+    # 1) Fondo: cover + blur SOLO si la imagen es horizontal (para ahorrar tiempo)
     bg = cover_resize(imagen, RES_W, RES_H)
-    bg = bg.filter(ImageFilter.GaussianBlur(radius=28))
+    if imagen.width > imagen.height:
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=18))
 
-    # Opcional: oscurecer un poquito para que el texto se lea mejor (sin barra azul)
+    # Oscurecer levemente para legibilidad (sin barra azul)
     overlay = Image.new("RGB", (RES_W, RES_H), (0, 0, 0))
     bg = Image.blend(bg, overlay, alpha=0.18)
 
-    # 2) Primer plano: imagen en modo "contain" (sin recortar)
+    # 2) Primer plano: contain (sin recortar)
     fg = contain_resize(imagen, RES_W, RES_H)
 
-    # 3) Composición
+    # 3) Composición base
     fondo = bg.copy()
     pos = ((RES_W - fg.width) // 2, (RES_H - fg.height) // 2)
     fondo.paste(fg, pos)
 
-    # ... lo demás de tu función queda igual (texto, wrap, guardar)
     texto = (texto or "").strip()
     if not texto:
         out = out_dir / f"slide_{idx:04d}.jpg"
         fondo.save(out, quality=92)
         return [out]
 
-    fuente = load_font(font_size)
+    fuente = load_font(FONT_SIZE)
 
     lineas = textwrap.wrap(
         re.sub(r"\s+", " ", texto).strip(),
@@ -505,7 +473,7 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
     )
 
     bloques = [lineas[i : i + RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]
-    outs = []
+    outs: list[Path] = []
 
     for j, bloque in enumerate(bloques):
         base = fondo.copy()
@@ -540,8 +508,6 @@ def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_si
         outs.append(out)
 
     return outs
-
-
 
 # =========================
 # ElevenLabs: long TTS
