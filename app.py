@@ -467,8 +467,9 @@ def render_slide(
     # --- LOGICA HORIZONTAL ---
     else:
         # Codigo original adaptado
-        imagen = ajustar_imagen(imagen, target_height=config.height)
-        def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:
+    
+        
+def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:
     imagen = Image.open(imagen_path).convert("RGB")
 
     # 1) Fondo: misma imagen en modo "cover" + blur
