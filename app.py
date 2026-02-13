@@ -357,6 +357,27 @@ def ajustar_imagen(imagen: Image.Image, target_height: int) -> Image.Image:
     nueva_w = int(target_height * relacion)
     return imagen.resize((nueva_w, target_height), Image.LANCZOS)
 
+def cover_resize(im: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """Escala la imagen para cubrir todo el canvas (sin bordes), y luego recorta al tamaño exacto."""
+    im = im.convert("RGB")
+    src_w, src_h = im.size
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w, new_h = int(src_w * scale), int(src_h * scale)
+    im2 = im.resize((new_w, new_h), Image.LANCZOS)
+
+    left = (new_w - target_w) // 2
+    top = (new_h - target_h) // 2
+    return im2.crop((left, top, left + target_w, top + target_h))
+
+
+def contain_resize(im: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """Escala la imagen para que quepa dentro del canvas (sin recortar), manteniendo aspecto."""
+    im = im.convert("RGB")
+    src_w, src_h = im.size
+    scale = min(target_w / src_w, target_h / src_h)
+    new_w, new_h = int(src_w * scale), int(src_h * scale)
+    return im.resize((new_w, new_h), Image.LANCZOS)
+
 
 def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -447,30 +468,42 @@ def render_slide(
     else:
         # Codigo original adaptado
         imagen = ajustar_imagen(imagen, target_height=config.height)
-        fondo = Image.new("RGB", (config.width, config.height), color="black")
-        pos = ((config.width - imagen.width) // 2, (config.height - imagen.height) // 2)
-        fondo.paste(imagen, pos)
+        def render_slide(imagen_path: Path, texto: str, idx: int, out_dir: Path, font_size: int = FONT_SIZE) -> list[Path]:
+    imagen = Image.open(imagen_path).convert("RGB")
 
+    # 1) Fondo: misma imagen en modo "cover" + blur
+    bg = cover_resize(imagen, RES_W, RES_H)
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=28))
+
+    # Opcional: oscurecer un poquito para que el texto se lea mejor (sin barra azul)
+    overlay = Image.new("RGB", (RES_W, RES_H), (0, 0, 0))
+    bg = Image.blend(bg, overlay, alpha=0.18)
+
+    # 2) Primer plano: imagen en modo "contain" (sin recortar)
+    fg = contain_resize(imagen, RES_W, RES_H)
+
+    # 3) Composición
+    fondo = bg.copy()
+    pos = ((RES_W - fg.width) // 2, (RES_H - fg.height) // 2)
+    fondo.paste(fg, pos)
+
+    # ... lo demás de tu función queda igual (texto, wrap, guardar)
     texto = (texto or "").strip()
     if not texto:
         out = out_dir / f"slide_{idx:04d}.jpg"
         fondo.save(out, quality=92)
         return [out]
 
-    fuente = load_font(config.font_size)
+    fuente = load_font(font_size)
 
-    # Texto wrap
     lineas = textwrap.wrap(
         re.sub(r"\s+", " ", texto).strip(),
-        width=config.wrap_width,
+        width=RENDER_WRAP_WIDTH,
         break_long_words=False,
         break_on_hyphens=False,
     )
 
-    # Si is_vertical y excedemos 1 linea, igual intentamos renderizar,
-    # aunque segmentar_para_slides deberia haberlo prevenido.
-    
-    bloques = [lineas[i : i + config.lines_per_image] for i in range(0, len(lineas), config.lines_per_image)]
+    bloques = [lineas[i : i + RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]
     outs = []
 
     for j, bloque in enumerate(bloques):
@@ -483,33 +516,14 @@ def render_slide(
             heights.append(bbox[3] - bbox[1])
 
         total_h = sum(heights) + 10 * (len(bloque) - 1)
-        
-        if config.is_vertical:
-            # Tercio inferior
-            # Inicio del tercio inferior:
-            y_start_zone = config.height * 2 / 3
-            # Centrado dentro del tercio inferior? O starting at top of bottom third?
-            # User: "centrado a un tercio inferior del total del alto"
-            # Interpetracion: El centro del bloque de texto debe estar en el centro del tercio inferior.
-            # Centro del tercio inferior = 2/3 H + (1/3 H)/2 = 5/6 H.
-            
-            center_y = config.height * 5 / 6
-            y0 = center_y - (total_h / 2)
-        else:
-            # Original logic: bottom area
-            y0 = config.height - total_h - 110
-
+        y0 = RES_H - total_h - 110
         y = y0
-        
+
         for linea, h in zip(bloque, heights):
             bbox = d.textbbox((0, 0), linea, font=fuente)
             w = bbox[2] - bbox[0]
-            if config.is_vertical:
-                x = (config.width - w) // 2
-            else:
-                x = (config.width - w) // 2
+            x = (RES_W - w) // 2
 
-            # Sombra / Borde
             d.text(
                 (x, y),
                 linea,
@@ -525,6 +539,7 @@ def render_slide(
         outs.append(out)
 
     return outs
+
 
 
 # =========================
