@@ -1,6 +1,5 @@
 streamlit
 pandas
-playwright==1.49.1
 moviepy>=1.0.3,<2
 toml
 requests>=2.31
