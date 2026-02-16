@@ -1,5 +1,6 @@
 streamlit
 pandas
+playwright==1.49.1
 moviepy>=1.0.3,<2
 toml
 requests>=2.31
@@ -9,4 +10,3 @@ imageio
 imageio-ffmpeg
 tqdm>=4.66
 numpy>=1.26
-playwright==1.49.1
