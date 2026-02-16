@@ -49,7 +49,12 @@ class VideoModeConfig:
     is_vertical: bool
 
 
-# ✅ Tipografía: Poppins Bold 40 pts (en ambos formatos)
+# 🔤 Poppins Bold 40 (pedido)
+POPPINS_BOLD_PATHS = [
+    "fonts/Poppins-Bold.ttf",
+    "Poppins-Bold.ttf",
+]
+
 CONFIG_HORIZONTAL = VideoModeConfig(
     name="Horizontal (16:9)",
     width=1920,
@@ -59,7 +64,7 @@ CONFIG_HORIZONTAL = VideoModeConfig(
     font_size=40,
     lines_per_image=2,
     wrap_width=35,
-    is_vertical=False
+    is_vertical=False,
 )
 
 CONFIG_VERTICAL = VideoModeConfig(
@@ -71,9 +76,8 @@ CONFIG_VERTICAL = VideoModeConfig(
     font_size=40,
     lines_per_image=1,
     wrap_width=15,
-    is_vertical=True
+    is_vertical=True,
 )
-
 
 HEADERS_FAKE = {
     "User-Agent": (
@@ -91,10 +95,8 @@ MIN_SLIDE_DURATION_WITH_VOICE = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
 
-# ✅ mínimo de imágenes
 MIN_IMAGES_REQUIRED = 5
 
-# Voces
 VOICE_OPTIONS = {
     "Luisa": "7nCYbNPCi8RLAKVnYEoO",
     "JC News": "4XUsiqPDK4UACIM2BILe",
@@ -106,7 +108,7 @@ VOICE_OPTIONS = {
 
 
 # =========================
-# PIN gate (si lo tienes en secrets)
+# OPTIONAL PIN gate (si está en secrets)
 # =========================
 def require_pin_if_configured():
     app_pin = st.secrets.get("APP_PIN", "")
@@ -152,8 +154,22 @@ QUOTES_MAP = str.maketrans(
 )
 
 ABREVIATURAS = [
-    "Sr.", "Sra.", "Dr.", "Dra.", "Ing.", "Lic.", "No.", "Nro.",
-    "Art.", "Pág.", "p. ej.", "p.ej.", "etc.", "EE. UU.", "U.S.", "vs.",
+    "Sr.",
+    "Sra.",
+    "Dr.",
+    "Dra.",
+    "Ing.",
+    "Lic.",
+    "No.",
+    "Nro.",
+    "Art.",
+    "Pág.",
+    "p. ej.",
+    "p.ej.",
+    "etc.",
+    "EE. UU.",
+    "U.S.",
+    "vs.",
 ]
 
 
@@ -252,77 +268,63 @@ def split_paragraphs_from_manual(text: str) -> list[str]:
 # FONT (Poppins Bold)
 # =========================
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    candidates = [
-        # recomendado
-        str(Path("assets/fonts/Poppins-Bold.ttf")),
-        "Poppins-Bold.ttf",
-        # fallback
-        "DejaVuSans-Bold.ttf",
-        "DejaVuSans.ttf",
-    ]
-    for c in candidates:
+    # 1) Poppins Bold
+    for p in POPPINS_BOLD_PATHS:
         try:
-            if Path(c).exists():
-                return ImageFont.truetype(c, size)
+            if Path(p).exists():
+                return ImageFont.truetype(p, size)
         except Exception:
             pass
 
-    # fallback final
-    try:
-        return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
-    except Exception:
-        return ImageFont.load_default()
-
-
-# =========================
-# SCRAPER ELTIEMPO (cached)
-#  - AHORA: usa SOLO RESUMEN
-# =========================
-def _extract_resumen_from_html(soup: BeautifulSoup) -> str:
-    """
-    Intenta extraer el resumen del elemento:
-    class="c-articulo__compartir-media__elemento--resumen-content"
-
-    Si no existe o viene vacío (a veces contenido por JS),
-    hace fallback a meta description / og:description / JSON-LD description.
-    """
-    # 1) selector principal (lo que pediste)
-    el = soup.select_one(".c-articulo__compartir-media__elemento--resumen-content")
-    if el:
-        txt = el.get_text(" ", strip=True)
-        txt = normalizar_texto(txt)
-        if txt and len(txt) >= 20:
-            return txt
-
-    # 2) meta description
-    meta_desc = soup.find("meta", attrs={"name": "description"})
-    if meta_desc and meta_desc.get("content"):
-        txt = normalizar_texto(meta_desc["content"])
-        if txt and len(txt) >= 20:
-            return txt
-
-    # 3) og:description
-    og_desc = soup.find("meta", attrs={"property": "og:description"})
-    if og_desc and og_desc.get("content"):
-        txt = normalizar_texto(og_desc["content"])
-        if txt and len(txt) >= 20:
-            return txt
-
-    # 4) JSON-LD description
-    for s in soup.find_all("script", attrs={"type": "application/ld+json"}):
+    # 2) fallback
+    for candidate in ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf"]:
         try:
-            data = json.loads(s.get_text(strip=True) or "{}")
-            # puede venir como dict o lista
-            objs = data if isinstance(data, list) else [data]
-            for o in objs:
-                if isinstance(o, dict) and o.get("description"):
-                    txt = normalizar_texto(str(o["description"]))
-                    if txt and len(txt) >= 20:
-                        return txt
+            return ImageFont.truetype(candidate, size)
         except Exception:
-            continue
+            pass
+    return ImageFont.load_default()
 
+
+# =========================
+# ELTIEMPO SCRAPER (RESUMEN como insumo)
+# =========================
+def _meta_content(soup: BeautifulSoup, attrs: dict) -> str:
+    tag = soup.find("meta", attrs=attrs)
+    if tag and tag.get("content"):
+        return tag["content"].strip()
     return ""
+
+
+def _extract_resumen_insumo(soup: BeautifulSoup) -> str:
+    """
+    Intenta:
+    1) class="c-articulo__compartir-media__elemento--resumen-content" (si viene server-side)
+    2) deck / bajada: primer H2 debajo del H1 (lo que sí viene en HTML estático)
+    3) meta description / og:description
+    """
+    # 1) Resumen largo (si existe en HTML sin JS)
+    resumen_el = soup.select_one(".c-articulo__compartir-media__elemento--resumen-content")
+    if resumen_el:
+        txt = resumen_el.get_text(" ", strip=True)
+        txt = normalizar_texto(txt)
+        if len(txt) >= 80:
+            return txt
+
+    # 2) Deck: primer h2 posterior al h1
+    # En el HTML “estático” suele venir como la bajada (como en tu ejemplo).
+    h1 = soup.find("h1")
+    if h1:
+        # buscar el siguiente h2 cercano
+        nxt = h1.find_next("h2")
+        if nxt:
+            txt = normalizar_texto(nxt.get_text(" ", strip=True))
+            if len(txt) >= 30:
+                return txt
+
+    # 3) meta fallback
+    txt = _meta_content(soup, {"property": "og:description"}) or _meta_content(soup, {"name": "description"})
+    txt = normalizar_texto(txt)
+    return txt
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
@@ -336,14 +338,14 @@ def extraer_contenido_articulo(url: str) -> tuple[str, str, list[str]]:
         raise ValueError("No se pudo encontrar el título del artículo.")
     titulo = titulo_el.get_text(" ", strip=True)
 
-    resumen = _extract_resumen_from_html(soup)
-    resumen = normalizar_texto(resumen)
-
+    # ✅ NUEVO: usamos resumen como insumo
+    resumen = _extract_resumen_insumo(soup)
     if not resumen or len(resumen) < 20:
-        raise ValueError("El resumen está vacío o demasiado corto.")
+        raise ValueError("El resumen está vacío o demasiado corto (posible carga dinámica en el sitio).")
 
-    # imágenes (igual que antes)
-    cuerpo = soup.find("div", class_="c-cuerpo") or soup.find("article")
+    # Imágenes (igual que antes)
+    cuerpo = soup.find("div", class_="c-cuerpo") or soup.find("article") or soup
+
     imagenes_urls = set()
 
     def limpiar_url(u):
@@ -363,25 +365,28 @@ def extraer_contenido_articulo(url: str) -> tuple[str, str, list[str]]:
         if u and (not u.lower().endswith(".svg")) and ("icon" not in u.lower()):
             imagenes_urls.add(u)
 
-    # thumb apertura
     apertura = soup.find("div", class_="c-articulo-apertura__media__thumb")
     if apertura:
         agregar_img(apertura.find("img"))
 
-    if cuerpo:
-        for media in cuerpo.find_all(
-            ["figure", "div"],
-            class_=["c-cuerpo__media__thumb", "c-cuerpo__media", "c-detail__media"],
-        ):
-            for img in media.find_all("img"):
-                agregar_img(img)
-            zoom = media.find("div", class_="c-cuerpo__media__thumb__zoom")
-            if zoom:
-                agregar_img(zoom.find("img"))
+    for media in cuerpo.find_all(
+        ["figure", "div"],
+        class_=["c-cuerpo__media__thumb", "c-cuerpo__media", "c-detail__media"],
+    ):
+        for img in media.find_all("img"):
+            agregar_img(img)
+        zoom = media.find("div", class_="c-cuerpo__media__thumb__zoom")
+        if zoom:
+            agregar_img(zoom.find("img"))
 
     galeria = soup.find("div", class_="c-galeria")
     if galeria:
         for img in galeria.find_all("img"):
+            agregar_img(img)
+
+    # fallback si no encontró nada
+    if not imagenes_urls:
+        for img in soup.find_all("img"):
             agregar_img(img)
 
     return titulo, resumen, list(imagenes_urls)
@@ -468,22 +473,19 @@ def render_slide(
 
     RES_W, RES_H = config.width, config.height
     FONT_SIZE = config.font_size
-    RENDER_WRAP_WIDTH = config.wrap_width
-    RENDER_LINES_PER_IMAGE = config.lines_per_image
+    WRAP_W = config.wrap_width
+    LINES_PER = config.lines_per_image
 
     imagen = Image.open(imagen_path).convert("RGB")
 
-    # Fondo: cover + blur (para llenar sin negro)
-    bg = cover_resize(imagen, RES_W, RES_H)
-    # blur solo si la imagen original es horizontal (optimización)
-    if imagen.width > imagen.height:
-        bg = bg.filter(ImageFilter.GaussianBlur(radius=18))
+    # Fondo: cover + blur para evitar bordes negros en horizontal
+    bg = cover_resize(imagen, RES_W, RES_H).filter(ImageFilter.GaussianBlur(radius=18))
 
-    # oscurecer levemente para legibilidad
+    # oscurecer levemente
     overlay = Image.new("RGB", (RES_W, RES_H), (0, 0, 0))
     bg = Image.blend(bg, overlay, alpha=0.18)
 
-    # Foreground: contain
+    # primer plano: contain
     fg = contain_resize(imagen, RES_W, RES_H)
 
     fondo = bg.copy()
@@ -497,14 +499,15 @@ def render_slide(
         return [out]
 
     fuente = load_font(FONT_SIZE)
+
     lineas = textwrap.wrap(
         re.sub(r"\s+", " ", texto).strip(),
-        width=RENDER_WRAP_WIDTH,
+        width=WRAP_W,
         break_long_words=False,
         break_on_hyphens=False,
     )
 
-    bloques = [lineas[i : i + RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]
+    bloques = [lineas[i : i + LINES_PER] for i in range(0, len(lineas), LINES_PER)]
     outs: list[Path] = []
 
     for j, bloque in enumerate(bloques):
@@ -673,7 +676,7 @@ def eleven_tts_long_to_mp3(
 
 
 # =========================
-# AUDIO: build final audio clip (voice/music)
+# AUDIO: build final audio clip
 # =========================
 def build_final_audio_clip(
     voice_path: Path | None,
@@ -712,7 +715,7 @@ def build_final_audio_clip(
 
 
 # =========================
-# END CLIP (CIERRE) + FIT TO CONFIG
+# END CLIP (CIERRE) + FIT
 # =========================
 def fit_clip_to_config(clip: VideoFileClip, config: VideoModeConfig) -> VideoFileClip:
     c = clip.resize(height=config.height)
@@ -722,7 +725,6 @@ def fit_clip_to_config(clip: VideoFileClip, config: VideoModeConfig) -> VideoFil
         c = c.crop(x1=x1, x2=x2)
     elif c.w < config.width:
         c = c.on_color(size=(config.width, config.height), color=(0, 0, 0), pos=("center", "center"))
-
     if c.h != config.height:
         c = c.resize(height=config.height)
     return c
@@ -829,16 +831,14 @@ def crear_video(
 
     final_clips = [main_video]
     cierre_clip = None
-    if not config.is_vertical:
-        if cierre_video_path and cierre_video_path.exists():
-            cierre_clip = VideoFileClip(str(cierre_video_path))
-            cierre_clip = fit_clip_to_config(cierre_clip, config)
-            final_clips.append(cierre_clip)
+    if not config.is_vertical and cierre_video_path and cierre_video_path.exists():
+        cierre_clip = VideoFileClip(str(cierre_video_path))
+        cierre_clip = fit_clip_to_config(cierre_clip, config)
+        final_clips.append(cierre_clip)
 
     final = concatenate_videoclips(final_clips, method="compose")
 
     out = work_dir / f"{safe_filename(titulo)}.mp4"
-
     final.write_videofile(
         str(out),
         fps=int(fps),
@@ -851,6 +851,7 @@ def crear_video(
         logger=None,
     )
 
+    # cleanup
     try:
         final.close()
     except Exception:
@@ -881,14 +882,14 @@ def crear_video(
 # =========================
 # HELPERS
 # =========================
-def build_textos_slides(include_title: bool, titulo: str, resumen: str, config: VideoModeConfig) -> list[str]:
+def build_textos_slides_from_resumen(include_title: bool, titulo: str, resumen: str, config: VideoModeConfig) -> list[str]:
     textos_slides: list[str] = []
+
     if include_title:
         t = normalizar_texto(titulo)
         if t:
             textos_slides.extend(segmentar_para_slides(t, config.max_chars, config.max_sentences))
 
-    # ✅ URL mode: SOLO resumen
     r = normalizar_texto(resumen)
     if r:
         textos_slides.extend(segmentar_para_slides(r, config.max_chars, config.max_sentences))
@@ -920,10 +921,9 @@ with st.sidebar:
         ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_v3"],
         index=0,
     )
-
     output_format = st.selectbox("Formato (MP3)", ["mp3_44100_128", "mp3_44100_192"], index=0)
 
-    voice_name = st.selectbox("Voz", list(VOICE_OPTIONS.keys()), index=1)
+    voice_name = st.selectbox("Voz", list(VOICE_OPTIONS.keys()), index=1)  # default JC News
     voice_id_direct = VOICE_OPTIONS[voice_name]
     st.caption(f"voice_id = {voice_id_direct}")
 
@@ -957,7 +957,7 @@ with col_config_2:
     orientacion_sel = st.radio(
         "Orientación de Video",
         ["Horizontal (16:9)", "Vertical (9:16)"],
-        horizontal=True
+        horizontal=True,
     )
 
 current_config = CONFIG_VERTICAL if "Vertical" in orientacion_sel else CONFIG_HORIZONTAL
@@ -975,16 +975,15 @@ overlay_text = want_text
 
 st.info(f"✅ Requisito: mínimo {MIN_IMAGES_REQUIRED} imágenes para generar.")
 
-
-# Estados
+# estados
 if "extracted" not in st.session_state:
     st.session_state.extracted = None
 if "url_downloaded_images" not in st.session_state:
     st.session_state.url_downloaded_images = []
-if "manual_paragraphs" not in st.session_state:
-    st.session_state.manual_paragraphs = []
 if "manual_uploaded_images" not in st.session_state:
     st.session_state.manual_uploaded_images = []
+if "manual_paragraphs" not in st.session_state:
+    st.session_state.manual_paragraphs = []
 
 
 def run_generate(
@@ -1005,13 +1004,10 @@ def run_generate(
 ) -> Path:
     texto_narracion = normalizar_texto(" ".join(textos_slides))
 
-    # Voz
     voice_path = None
     if want_voice:
         if not api_key:
             raise ValueError("Falta API Key de ElevenLabs.")
-        if not voice_id_direct:
-            raise ValueError("Voice ID inválido.")
         if not texto_narracion.strip():
             raise ValueError("No hay texto para narrar.")
         voice_path = eleven_tts_long_to_mp3(
@@ -1025,7 +1021,6 @@ def run_generate(
             work_dir=work_dir,
         )
 
-    # Música
     music_path = None
     if use_bgm:
         if bgm_file is None:
@@ -1054,7 +1049,7 @@ def run_generate(
 
 
 # =========================
-# MODO URL (SOLO RESUMEN)
+# MODO URL (solo resumen)
 # =========================
 if modo == "Desde URL de El Tiempo":
     url = st.text_input("URL del artículo", placeholder="https://www.eltiempo.com/...")
@@ -1078,7 +1073,7 @@ if modo == "Desde URL de El Tiempo":
 
             st.session_state.extracted = {"titulo": titulo, "resumen": resumen, "img_urls": img_urls}
             st.session_state.url_downloaded_images = downloaded
-            st.success(f"Listo. ✅ Resumen OK | Imágenes: {len(downloaded)}")
+            st.success(f"Listo. Imágenes: {len(downloaded)}")
         except Exception as e:
             st.session_state.extracted = None
             st.session_state.url_downloaded_images = []
@@ -1093,11 +1088,10 @@ if modo == "Desde URL de El Tiempo":
         include_title = st.checkbox("Incluir título", value=True, key="url_include_title")
         titulo_in = st.text_input("Título", value=data["titulo"], key="url_title")
 
-        # ✅ el usuario puede editar el resumen si quiere
         resumen_in = st.text_area(
             "Resumen (se usa para subtítulos y audio)",
             value=data["resumen"],
-            height=160,
+            height=140,
             key="url_resumen",
         )
 
@@ -1106,34 +1100,29 @@ if modo == "Desde URL de El Tiempo":
 
         all_imgs = st.session_state.url_downloaded_images
         selected_imgs = []
+
         if all_imgs:
-            st.write(f"Imágenes disponibles ({len(all_imgs)}):")
             cols_per_row = 3
             for i in range(0, len(all_imgs), cols_per_row):
-                row_imgs = all_imgs[i:i+cols_per_row]
+                row_imgs = all_imgs[i : i + cols_per_row]
                 cols = st.columns(cols_per_row)
                 for j, img_path in enumerate(row_imgs):
                     img_idx = i + j
                     with cols[j]:
                         st.image(str(img_path), width="stretch", caption=f"Imagen {img_idx+1}")
-                        use_img = st.checkbox(
-                            f"Usar imagen {img_idx+1}",
-                            value=True,
-                            key=f"url_img_ck_{img_idx}"
-                        )
+                        use_img = st.checkbox(f"Usar {img_idx+1}", value=True, key=f"url_img_ck_{img_idx}")
                         if use_img:
                             selected_imgs.append(img_path)
         else:
-            st.info("No hay imágenes descargadas. Ejecuta 'Extraer contenido' primero.")
+            st.info("No hay imágenes descargadas aún.")
+            selected_imgs = []
 
         st.divider()
         st.subheader("Configuración de Audio y Cierre")
 
-        st.markdown("#### Música (Audio Network)")
         bgm_file = st.file_uploader(
-            "Sube música de fondo (MP3/WAV)",
+            "Música de fondo (MP3/WAV) (opcional / obligatorio en Solo Texto + Música)",
             type=["mp3", "wav"],
-            accept_multiple_files=False,
             key="bgm_upload_url",
         )
 
@@ -1161,11 +1150,9 @@ if modo == "Desde URL de El Tiempo":
 
         cierre_video_upload = None
         if not current_config.is_vertical:
-            st.markdown("#### Video de Cierre (opcional)")
             cierre_video_upload = st.file_uploader(
                 "Video de cierre (opcional) - MP4/MOV/WEBM",
                 type=["mp4", "mov", "webm"],
-                accept_multiple_files=False,
                 key="cierre_video_url",
             )
         else:
@@ -1180,17 +1167,14 @@ if modo == "Desde URL de El Tiempo":
             if want_music_required and bgm_file is None:
                 st.error("En 'Solo Texto + Música' debes subir música.")
                 st.stop()
-            if include_title and not (titulo_in or "").strip():
-                st.error("Marcaste 'Incluir título' pero el título está vacío.")
-                st.stop()
-            if not (resumen_in or "").strip():
+            if not resumen_in.strip():
                 st.error("El resumen está vacío.")
                 st.stop()
             if not selected_imgs:
                 st.error("No has seleccionado ninguna imagen.")
                 st.stop()
             if len(selected_imgs) < MIN_IMAGES_REQUIRED:
-                st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Seleccionaste {len(selected_imgs)}.")
+                st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Tienes {len(selected_imgs)}.")
                 st.stop()
 
             work_dir = Path(tempfile.mkdtemp(prefix="url_video_"))
@@ -1201,7 +1185,13 @@ if modo == "Desde URL de El Tiempo":
             try:
                 progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_in) if include_title else "video"
-                textos_slides = build_textos_slides(include_title, titulo_in, resumen_in, config=current_config)
+
+                textos_slides = build_textos_slides_from_resumen(
+                    include_title=include_title,
+                    titulo=titulo_in,
+                    resumen=resumen_in,
+                    config=current_config,
+                )
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
 
@@ -1244,7 +1234,6 @@ if modo == "Desde URL de El Tiempo":
                     shutil.rmtree(work_dir, ignore_errors=True)
                 except Exception:
                     pass
-
     else:
         st.info("Pega una URL y presiona **Extraer contenido** para empezar.")
 
@@ -1268,7 +1257,7 @@ else:
         )
 
     texto_manual = st.text_area(
-        "Pega aquí el texto completo (se separa por párrafos usando líneas en blanco)",
+        "Pega aquí el texto (se separa por párrafos usando líneas en blanco)",
         height=220,
         key="manual_text",
     )
@@ -1305,21 +1294,17 @@ else:
 
         all_imgs = st.session_state.manual_uploaded_images
         selected_imgs = []
+
         if all_imgs:
-            st.write(f"Imágenes disponibles ({len(all_imgs)}):")
             cols_per_row = 3
             for i in range(0, len(all_imgs), cols_per_row):
-                row_imgs = all_imgs[i:i+cols_per_row]
+                row_imgs = all_imgs[i : i + cols_per_row]
                 cols = st.columns(cols_per_row)
                 for j, img_path in enumerate(row_imgs):
                     img_idx = i + j
                     with cols[j]:
                         st.image(str(img_path), width="stretch", caption=f"Imagen {img_idx+1}")
-                        use_img = st.checkbox(
-                            f"Usar imagen {img_idx+1}",
-                            value=True,
-                            key=f"manual_img_ck_{img_idx}"
-                        )
+                        use_img = st.checkbox(f"Usar {img_idx+1}", value=True, key=f"manual_img_ck_{img_idx}")
                         if use_img:
                             selected_imgs.append(img_path)
         else:
@@ -1328,11 +1313,9 @@ else:
         st.divider()
         st.subheader("Configuración de Audio y Cierre")
 
-        st.markdown("#### Música (Audio Network)")
         bgm_file = st.file_uploader(
-            "Sube música de fondo (MP3/WAV)",
+            "Música de fondo (MP3/WAV) (opcional / obligatorio en Solo Texto + Música)",
             type=["mp3", "wav"],
-            accept_multiple_files=False,
             key="bgm_upload_manual",
         )
 
@@ -1360,11 +1343,9 @@ else:
 
         cierre_video_upload = None
         if not current_config.is_vertical:
-            st.markdown("#### Video de Cierre (opcional)")
             cierre_video_upload = st.file_uploader(
                 "Video de cierre (opcional) - MP4/MOV/WEBM",
                 type=["mp4", "mov", "webm"],
-                accept_multiple_files=False,
                 key="cierre_video_manual",
             )
         else:
@@ -1385,14 +1366,11 @@ else:
             if not selected_pars and not include_title_m:
                 st.error("No hay textos seleccionados (ni título ni párrafos).")
                 st.stop()
-            if not uploaded_manual_imgs:
-                st.error(f"En modo manual debes subir al menos {MIN_IMAGES_REQUIRED} imágenes.")
-                st.stop()
             if not selected_imgs:
                 st.error("No has seleccionado ninguna imagen.")
                 st.stop()
             if len(selected_imgs) < MIN_IMAGES_REQUIRED:
-                st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Seleccionaste {len(selected_imgs)}.")
+                st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Tienes {len(selected_imgs)}.")
                 st.stop()
 
             work_dir = Path(tempfile.mkdtemp(prefix="manual_video_"))
@@ -1404,15 +1382,12 @@ else:
                 progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_m) if include_title_m else "video"
 
-                # Manual sigue usando los párrafos seleccionados
+                # manual sigue usando párrafos seleccionados (sin cambios)
                 textos_slides = []
                 if include_title_m:
-                    textos_slides.extend(segmentar_para_slides(titulo_final, current_config.max_chars, current_config.max_sentences))
+                    textos_slides.extend(segmentar_para_slides(titulo_m, current_config.max_chars, current_config.max_sentences))
                 for p in selected_pars:
-                    p = normalizar_texto(p)
-                    if p:
-                        textos_slides.extend(segmentar_para_slides(p, current_config.max_chars, current_config.max_sentences))
-
+                    textos_slides.extend(segmentar_para_slides(p, current_config.max_chars, current_config.max_sentences))
                 textos_slides = [t for t in textos_slides if t.strip()]
                 if not textos_slides:
                     raise ValueError("No quedaron textos para slides tras segmentar.")
