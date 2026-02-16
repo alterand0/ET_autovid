@@ -295,53 +295,71 @@ def _meta_content(soup: BeautifulSoup, attrs: dict) -> str:
     return ""
 
 
-def _extract_resumen_insumo(soup: BeautifulSoup) -> str:
+def _extract_resumen_insumo(soup: BeautifulSoup, raw_html: str) -> str:
     """
-    Intenta:
-    1) class="c-articulo__compartir-media__elemento--resumen-content" (si viene server-side)
-    2) deck / bajada: primer H2 debajo del H1 (lo que sí viene en HTML estático)
-    3) meta description / og:description
+    Extrae el resumen largo desde:
+    <p class="c-articulo__compartir-media__elemento--resumen-content"> ... </p>
+
+    - Preserva <br> como saltos de línea
+    - Quita comillas sueltas al inicio
+    - No exige longitud mínima alta (para no caer al fallback)
     """
-    # 1) Resumen largo (si existe en HTML sin JS)
-    resumen_el = soup.select_one(".c-articulo__compartir-media__elemento--resumen-content")
-    if resumen_el:
-        txt = resumen_el.get_text(" ", strip=True)
-        txt = normalizar_texto(txt)
-        if len(txt) >= 80:
+
+    # 1) Intento directo con BeautifulSoup
+    el = soup.select_one("p.c-articulo__compartir-media__elemento--resumen-content")
+    if el:
+        txt = el.get_text("\n", strip=True)  # 👈 clave: "\n" para respetar <br>
+        txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+        txt = txt.strip('"').strip()
+        if txt:
             return txt
 
-    # 2) Deck: primer h2 posterior al h1
-    # En el HTML “estático” suele venir como la bajada (como en tu ejemplo).
-    h1 = soup.find("h1")
-    if h1:
-        # buscar el siguiente h2 cercano
-        nxt = h1.find_next("h2")
-        if nxt:
-            txt = normalizar_texto(nxt.get_text(" ", strip=True))
-            if len(txt) >= 30:
-                return txt
+    # 2) Fallback por regex si el parser no lo está capturando
+    # Busca el bloque del <p class="...resumen-content"> ... </p>
+    pattern = r'<p[^>]*class="[^"]*c-articulo__compartir-media__elemento--resumen-content[^"]*"[^>]*>(.*?)</p>'
+    m = re.search(pattern, raw_html, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        inner = m.group(1)
+        # convierte <br> a saltos
+        inner = re.sub(r"<br\s*/?>", "\n", inner, flags=re.IGNORECASE)
+        # quita tags remanentes
+        inner = re.sub(r"<[^>]+>", "", inner)
+        # limpia entidades básicas
+        inner = (
+            inner.replace("&quot;", '"')
+                 .replace("&amp;", "&")
+                 .replace("&nbsp;", " ")
+        )
+        inner = re.sub(r"\n{3,}", "\n\n", inner).strip()
+        inner = inner.strip('"').strip()
+        if inner:
+            return inner
 
-    # 3) meta fallback
-    txt = _meta_content(soup, {"property": "og:description"}) or _meta_content(soup, {"name": "description"})
-    txt = normalizar_texto(txt)
-    return txt
+    return ""  # si no está en HTML server-side, aquí queda vacío
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def extraer_contenido_articulo(url: str) -> tuple[str, str, list[str]]:
     r = requests.get(url, headers=HEADERS_FAKE, timeout=30)
     r.raise_for_status()
-    soup = BeautifulSoup(r.content, "html.parser")
+
+    raw_html = r.text
+    soup = BeautifulSoup(raw_html, "html.parser")
 
     titulo_el = soup.find("h1", class_="c-articulo__titulo") or soup.find("h1")
     if not titulo_el:
         raise ValueError("No se pudo encontrar el título del artículo.")
     titulo = titulo_el.get_text(" ", strip=True)
 
-    # ✅ NUEVO: usamos resumen como insumo
-    resumen = _extract_resumen_insumo(soup)
-    if not resumen or len(resumen) < 20:
-        raise ValueError("El resumen está vacío o demasiado corto (posible carga dinámica en el sitio).")
+    resumen = _extract_resumen_insumo(soup, raw_html)
+    if not resumen:
+        raise ValueError(
+            "No se encontró el resumen largo en el HTML. "
+            "Ojo: puede estar cargándose vía JS (no disponible con requests)."
+        )
+
+    # ... tu extracción de imágenes igual
+    # return titulo, resumen, list(imagenes_urls)
 
     # Imágenes (igual que antes)
     cuerpo = soup.find("div", class_="c-cuerpo") or soup.find("article") or soup
