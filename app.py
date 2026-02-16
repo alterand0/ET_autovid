@@ -55,7 +55,7 @@ CONFIG_HORIZONTAL = VideoModeConfig(
     height=1080,
     max_chars=60,
     max_sentences=1,
-    font_size=55, # Increased slightly for readability
+    font_size=40, # Increased slightly for readability
     lines_per_image=2,
     wrap_width=35,
     is_vertical=False
@@ -67,7 +67,7 @@ CONFIG_VERTICAL = VideoModeConfig(
     height=1920,
     max_chars=17,
     max_sentences=1,
-    font_size=60,
+    font_size=50,
     lines_per_image=1,
     wrap_width=15,
     is_vertical=True
@@ -85,7 +85,7 @@ HEADERS_FAKE = {
 }
 
 DEFAULT_FPS = 24
-DEFAULT_SLIDE_DURATION = 6.0
+DEFAULT_SLIDE_DURATION = 4.0
 MIN_SLIDE_DURATION_WITH_VOICE = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
@@ -269,11 +269,17 @@ def split_paragraphs_from_manual(text: str) -> list[str]:
 # FONT
 # =========================
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    for candidate in ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf"]:
+    candidates = [
+        "assets/fonts/Poppins-Bold.ttf",
+        "Poppins-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        "DejaVuSans.ttf",
+    ]
+    for c in candidates:
         try:
-            return ImageFont.truetype(candidate, size)
+            return ImageFont.truetype(c, size)
         except Exception:
-            pass
+            continue
     return ImageFont.load_default()
 
 
@@ -281,32 +287,32 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
 # SCRAPER ELTIEMPO (cached)
 # =========================
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def extraer_contenido_articulo(url: str) -> tuple[str, list[str], list[str]]:
+def extraer_contenido_articulo(url: str) -> tuple[str, str, list[str]]:
     r = requests.get(url, headers=HEADERS_FAKE, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.content, "html.parser")
 
+    # Título
     titulo_el = soup.find("h1", class_="c-articulo__titulo") or soup.find("h1")
     if not titulo_el:
         raise ValueError("No se pudo encontrar el título del artículo.")
     titulo = titulo_el.get_text(" ", strip=True)
 
-    cuerpo = soup.find("div", class_="c-cuerpo") or soup.find("article")
-    if not cuerpo:
-        raise ValueError("No se pudo encontrar el cuerpo del artículo.")
+    # ✅ Resumen (nuevo insumo único)
+    resumen_el = soup.find("div", class_="c-articulo__compartir-media__elemento--resumen-content")
+    if not resumen_el:
+        # fallback por si cambia el tag
+        resumen_el = soup.find(class_="c-articulo__compartir-media__elemento--resumen-content")
 
-    parrafos = []
-    divs = cuerpo.find_all("div", class_="paragraph")
-    for d in divs:
-        t = d.get_text(" ", strip=True)
-        if t:
-            parrafos.append(t)
+    if not resumen_el:
+        raise ValueError("No se pudo encontrar el resumen del artículo (resumen-content).")
 
-    if not parrafos:
-        for p in cuerpo.find_all("p"):
-            t = p.get_text(" ", strip=True)
-            if len(t) > 50:
-                parrafos.append(t)
+    resumen = resumen_el.get_text(" ", strip=True)
+    if not resumen or len(resumen) < 10:
+        raise ValueError("El resumen está vacío o demasiado corto.")
+
+    # Imágenes (igual que antes, usando cuerpo si existe)
+    cuerpo = soup.find("div", class_="c-cuerpo") or soup.find("article") or soup
 
     imagenes_urls = set()
 
@@ -346,7 +352,7 @@ def extraer_contenido_articulo(url: str) -> tuple[str, list[str], list[str]]:
         for img in galeria.find_all("img"):
             agregar_img(img)
 
-    return titulo, parrafos, list(imagenes_urls)
+    return titulo, resumen, list(imagenes_urls)
 
 
 # =========================
@@ -1058,7 +1064,7 @@ if modo == "Desde URL de El Tiempo":
     if st.button("1) Extraer contenido", type="primary", disabled=not bool(url)):
         try:
             with st.spinner("Extrayendo..."):
-                titulo, parrafos, img_urls = extraer_contenido_articulo(url)
+                titulo, resumen, img_urls = extraer_contenido_articulo(url)
             
             # Descargar imágenes inmediatamente para mostrar preview
             temp_dir = Path(tempfile.mkdtemp(prefix="preview_imgs_"))
@@ -1067,9 +1073,9 @@ if modo == "Desde URL de El Tiempo":
                 if uploaded_extra:
                     downloaded.extend(guardar_imagenes_subidas(uploaded_extra, temp_dir))
             
-            st.session_state.extracted = {"titulo": titulo, "parrafos": parrafos, "img_urls": img_urls}
+            st.session_state.extracted = {"titulo": titulo, "resumen": resumen, "img_urls": img_urls}
             st.session_state.url_downloaded_images = downloaded
-            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes descargadas: {len(downloaded)}")
+            st.success(f"Listo. resumen: {len(resumen)} | Imágenes descargadas: {len(downloaded)}")
         except Exception as e:
             st.session_state.extracted = None
             st.session_state.url_downloaded_images = []
@@ -1084,18 +1090,9 @@ if modo == "Desde URL de El Tiempo":
         include_title = st.checkbox("Incluir título", value=True, key="url_include_title")
         titulo_in = st.text_input("Título", value=data["titulo"], key="url_title")
 
-        st.write("Párrafos (marca los que quieres incluir):")
-        selected_pars = []
-        for i, p in enumerate(data["parrafos"]):
-            col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment="top")
-            with col_chk:
-                ck = st.checkbox("Usar", value=True, key=f"url_par_ck_{i}")
-            with col_txt:
-                txt = st.text_area(label=f"Párrafo {i+1}", value=p, height=90, key=f"url_par_txt_{i}")
-            if ck:
-                selected_pars.append(txt)
-
-
+        st.write("Resumen (este será el ÚNICO texto para slides y voz):")
+        resumen_in = st.text_area("Resumen", value=data["resumen"], height=140, key="url_resumen")
+        
         st.divider()
         
         # Image Selection UI - URL Mode
@@ -1199,20 +1196,23 @@ if modo == "Desde URL de El Tiempo":
             try:
                 progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_in) if include_title else "video"
-                textos_slides = build_textos_slides(include_title, titulo_in, selected_pars, config=current_config)
-                if not textos_slides:
-                    raise ValueError("No quedaron textos para slides tras segmentar.")
+                resumen_norm = normalizar_texto(resumen_in)
+                if not resumen_norm:
+                    st.error("El resumen está vacío.")
+                    st.stop()
 
                 progress.progress(30, text="Preparando imágenes seleccionadas...")
                 # Usar imágenes seleccionadas en lugar de descargar nuevamente
                 if not selected_imgs:
                     st.error("No has seleccionado ninguna imagen.")
                     st.stop()
-                
-                # ✅ validar mínimo de imágenes
-                if len(selected_imgs) < MIN_IMAGES_REQUIRED:
-                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente seleccionaste {len(selected_imgs)}. Selecciona más imágenes.")
-                    st.stop()
+                textos_slides = []
+                if include_title:
+                    textos_slides.extend(segmentar_para_slides(normalizar_texto(titulo_in), current_config.max_chars, current_config.max_sentences))
+                               
+                # ✅ SOLO resumen
+                textos_slides.extend(segmentar_para_slides(resumen_norm, current_config.max_chars, current_config.max_sentences))
+                textos_slides = [t for t in textos_slides if t.strip()]
                 
                 # Copiar imágenes seleccionadas al directorio de trabajo
                 imgs = []
