@@ -23,3 +23,8 @@ libxcursor1
 libxi6
 ca-certificates
 fonts-liberation
+chromium
+chromium-driver
+fonts-liberation
+fontconfig
+ffmpeg
