@@ -16,29 +16,39 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-def ensure_playwright_chromium():
-    # Streamlit Cloud corre como /home/appuser
-    # Si no hay browsers instalados, instalarlos
-    try:
-        # variable típica cuando estás en Cloud (no siempre existe, pero ayuda)
-        is_cloud = os.path.exists("/home/appuser")
-        if not is_cloud:
-            return
+@st.cache_resource(show_spinner=False)
+def ensure_playwright_chromium_installed():
+    """
+    Streamlit Community Cloud NO corre 'playwright install' en build (cuando no hay Build command).
+    Esto instala Chromium en runtime SOLO si no existe.
+    Queda cacheado por st.cache_resource para que no se ejecute en cada rerun.
+    """
+    # Señal típica del entorno de Streamlit Cloud
+    home = os.path.expanduser("~")
+    is_cloud = home.startswith("/home/appuser")
+    if not is_cloud:
+        return  # local/docker: lo manejas con tu Dockerfile
 
-        # si ya existe el cache de ms-playwright, no hacer nada
-        pw_cache = os.path.expanduser("~/.cache/ms-playwright")
-        if os.path.isdir(pw_cache) and any(os.scandir(pw_cache)):
-            return
+    pw_cache = os.path.join(home, ".cache", "ms-playwright")
 
-        subprocess.run(
-            ["python", "-m", "playwright", "install", "chromium"],
-            check=True,
-        )
-    except Exception:
-        # si falla, que falle luego con el error original y lo ves en logs
-        pass
+    # Si ya hay algo instalado, no hacemos nada
+    if os.path.isdir(pw_cache):
+        try:
+            if any(os.scandir(pw_cache)):
+                return
+        except Exception:
+            # si scandir falla, intentamos instalar igual
+            pass
 
-ensure_playwright_chromium()
+    # Instalar chromium
+    st.info("Instalando Chromium (Playwright) por primera vez en Streamlit Cloud…")
+    subprocess.run(
+        ["python", "-m", "playwright", "install", "chromium"],
+        check=True,
+    )
+
+# Ejecuta el ensure ANTES de usar Playwright
+ensure_playwright_chromium_installed()
 
 # Playwright
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -283,6 +293,10 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
 # ELTIEMPO: PLAYWRIGHT RESUMEN REAL
 # =========================
 def _pw_get_resumen(url: str, headers: dict, cookies_json: str | None = None) -> str:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    import re
+    import json
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
 
@@ -304,46 +318,44 @@ def _pw_get_resumen(url: str, headers: dict, cookies_json: str | None = None) ->
                 pass
 
         page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-        # cerrar banners (best-effort)
-        for sel in [
-            "button#didomi-notice-agree-button",
-            "button:has-text('Aceptar')",
-            "button:has-text('Entendido')",
-            "button:has-text('Continuar')",
-        ]:
-            try:
-                page.locator(sel).first.click(timeout=1200)
-                break
-            except Exception:
-                pass
 
         try:
-            # Esperar bloque
-            page.wait_for_selector(".c-articulo__compartir-media", timeout=20000)
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-            # ✅ FIX: strict mode violation → forzamos first() y lo acotamos al contenedor
+            # Cerrar banners (best-effort)
+            for sel in [
+                "button#didomi-notice-agree-button",
+                "button:has-text('Aceptar')",
+                "button:has-text('Entendido')",
+                "button:has-text('Continuar')",
+            ]:
+                try:
+                    page.locator(sel).first.click(timeout=1200)
+                    break
+                except Exception:
+                    pass
+
+            # Esperar el bloque de compartir
+            page.wait_for_selector(".c-articulo__compartir-media", timeout=20000)
             cont = page.locator(".c-articulo__compartir-media").first
 
-            # El botón a veces viene duplicado. Click al primero visible.
+            # Botón Resumen (a veces duplicado → first(), y si no, por rol)
             btn = cont.locator("button.c-articulo__compartir-media__elemento--resumen").first
             try:
                 btn.wait_for(state="visible", timeout=12000)
                 btn.click(timeout=12000)
             except Exception:
-                # fallback por texto si cambiaron clases
                 cont.get_by_role("button", name=re.compile(r"Resumen", re.I)).first.click(timeout=12000)
 
-            # Esperar el contenido real del resumen
-            cont.wait_for_selector(".c-articulo__compartir-media__elemento--resumen-content", timeout=20000)
-            el = cont.locator(".c-articulo__compartir-media__elemento--resumen-content").first
+            # Esperar contenido del resumen (OJO: en Locator se usa wait_for, no wait_for_selector)
+            resumen_loc = cont.locator(".c-articulo__compartir-media__elemento--resumen-content").first
+            resumen_loc.wait_for(state="visible", timeout=20000)
 
             # Extraer texto preservando <br>
             try:
-                txt = el.inner_text(timeout=5000)
+                txt = resumen_loc.inner_text(timeout=5000)
             except Exception:
-                txt = el.evaluate(
+                txt = resumen_loc.evaluate(
                     """(node) => {
                         const clone = node.cloneNode(true);
                         clone.querySelectorAll('br').forEach(br => br.replaceWith('\\n'));
@@ -351,13 +363,12 @@ def _pw_get_resumen(url: str, headers: dict, cookies_json: str | None = None) ->
                     }"""
                 )
 
-            page.close()
-            context.close()
-            browser.close()
-
             return normalizar_texto(txt)
 
         except PlaywrightTimeoutError:
+            return ""
+
+        finally:
             try:
                 page.close()
             except Exception:
@@ -370,7 +381,6 @@ def _pw_get_resumen(url: str, headers: dict, cookies_json: str | None = None) ->
                 browser.close()
             except Exception:
                 pass
-            return ""
 
 
 # =========================
