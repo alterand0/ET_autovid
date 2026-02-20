@@ -16,6 +16,30 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
+def ensure_playwright_chromium():
+    # Streamlit Cloud corre como /home/appuser
+    # Si no hay browsers instalados, instalarlos
+    try:
+        # variable típica cuando estás en Cloud (no siempre existe, pero ayuda)
+        is_cloud = os.path.exists("/home/appuser")
+        if not is_cloud:
+            return
+
+        # si ya existe el cache de ms-playwright, no hacer nada
+        pw_cache = os.path.expanduser("~/.cache/ms-playwright")
+        if os.path.isdir(pw_cache) and any(os.scandir(pw_cache)):
+            return
+
+        subprocess.run(
+            ["python", "-m", "playwright", "install", "chromium"],
+            check=True,
+        )
+    except Exception:
+        # si falla, que falle luego con el error original y lo ves en logs
+        pass
+
+ensure_playwright_chromium()
+
 # Playwright
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
