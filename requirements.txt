@@ -9,4 +9,4 @@ imageio
 imageio-ffmpeg
 tqdm>=4.66
 numpy>=1.26
-playwright>=1.40
+playwright==1.41.2
