@@ -42,10 +42,7 @@ def ensure_playwright_chromium_installed():
 
     # Instalar chromium
     st.info("Instalando Chromium (Playwright) por primera vez en Streamlit Cloud…")
-    subprocess.run(
-        ["python", "-m", "playwright", "install", "chromium"],
-        check=True,
-    )
+    
 
 # Ejecuta el ensure ANTES de usar Playwright
 ensure_playwright_chromium_installed()
@@ -298,7 +295,18 @@ def _pw_get_resumen(url: str, headers: dict, cookies_json: str | None = None) ->
     import json
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        import os
+
+        browser = p.chromium.launch(
+            headless=True,
+            executable_path=os.getenv("CHROMIUM_PATH", "/usr/bin/chromium"),
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-setuid-sandbox",
+            ],
+        )
 
         context = browser.new_context(
             user_agent=headers.get("User-Agent"),
