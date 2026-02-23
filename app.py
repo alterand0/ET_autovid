@@ -5,50 +5,15 @@ import hashlib
 import tempfile
 import subprocess
 import textwrap
-import os
 from io import BytesIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-
-@st.cache_resource(show_spinner=False)
-def ensure_playwright_chromium_installed():
-    """
-    Streamlit Community Cloud NO corre 'playwright install' en build (cuando no hay Build command).
-    Esto instala Chromium en runtime SOLO si no existe.
-    Queda cacheado por st.cache_resource para que no se ejecute en cada rerun.
-    """
-    # Señal típica del entorno de Streamlit Cloud
-    home = os.path.expanduser("~")
-    is_cloud = home.startswith("/home/appuser")
-    if not is_cloud:
-        return  # local/docker: lo manejas con tu Dockerfile
-
-    pw_cache = os.path.join(home, ".cache", "ms-playwright")
-
-    # Si ya hay algo instalado, no hacemos nada
-    if os.path.isdir(pw_cache):
-        try:
-            if any(os.scandir(pw_cache)):
-                return
-        except Exception:
-            # si scandir falla, intentamos instalar igual
-            pass
-
-    # Instalar chromium
-    st.info("Instalando Chromium (Playwright) por primera vez en Streamlit Cloud…")
-    
-
-# Ejecuta el ensure ANTES de usar Playwright
-ensure_playwright_chromium_installed()
-
-# Playwright
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from dataclasses import dataclass
 
 # --- FIX Pillow>=10 (MoviePy usa Image.ANTIALIAS en algunas versiones) ---
 if not hasattr(Image, "ANTIALIAS"):
@@ -63,6 +28,7 @@ from moviepy.editor import (
     concatenate_videoclips,
     AudioFileClip,
     CompositeAudioClip,
+    CompositeVideoClip,
 )
 from moviepy.audio.fx.all import audio_loop, audio_fadein, audio_fadeout, volumex
 import imageio_ffmpeg
@@ -83,37 +49,30 @@ class VideoModeConfig:
     wrap_width: int
     is_vertical: bool
 
-
-POPPINS_BOLD_PATHS = [
-    "assets/Poppins-Bold.ttf",
-    "./assets/Poppins-Bold.ttf",
-    "/app/assets/Poppins-Bold.ttf",
-    "/usr/local/share/fonts/poppins/Poppins-Bold.ttf",  # Dockerfile
-]
-
 CONFIG_HORIZONTAL = VideoModeConfig(
     name="Horizontal (16:9)",
     width=1920,
     height=1080,
     max_chars=60,
     max_sentences=1,
-    font_size=40,
+    font_size=55, # Increased slightly for readability
     lines_per_image=2,
-    wrap_width=38,
-    is_vertical=False,
+    wrap_width=35,
+    is_vertical=False
 )
 
 CONFIG_VERTICAL = VideoModeConfig(
     name="Vertical (9:16)",
     width=1080,
     height=1920,
-    max_chars=24,
+    max_chars=17,
     max_sentences=1,
-    font_size=40,
-    lines_per_image=2,
-    wrap_width=22,
-    is_vertical=True,
+    font_size=60,
+    lines_per_image=1,
+    wrap_width=15,
+    is_vertical=True
 )
+
 
 HEADERS_FAKE = {
     "User-Agent": (
@@ -131,8 +90,14 @@ MIN_SLIDE_DURATION_WITH_VOICE = 3.5
 
 ELEVEN_BASE = "https://api.elevenlabs.io"
 
+# Defaults if not specified (legacy support)
+DEFAULT_CONFIG = CONFIG_HORIZONTAL
+
+
+# ✅ mínimo de imágenes
 MIN_IMAGES_REQUIRED = 5
 
+# Voces
 VOICE_OPTIONS = {
     "Luisa": "7nCYbNPCi8RLAKVnYEoO",
     "JC News": "4XUsiqPDK4UACIM2BILe",
@@ -141,6 +106,33 @@ VOICE_OPTIONS = {
     "El Faraón": "W1hAcdh0RNsPYUA7fkJh",
     "Fernando": "dlGxemPxFMTY7iXagmOj",
 }
+
+
+# =========================
+# PIN gate
+# =========================
+def require_pin_if_configured():
+    app_pin = st.secrets.get("APP_PIN", "")
+    if not app_pin:
+        return
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return
+
+    st.warning("🔒 Esta app está protegida con PIN.")
+    pin = st.text_input("Ingresa el PIN", type="password")
+    if st.button("Entrar", type="primary"):
+        if pin == app_pin:
+            st.session_state.authenticated = True
+            st.success("Acceso concedido ✅")
+            st.rerun()
+        else:
+            st.error("PIN incorrecto ❌")
+
+    st.stop()
 
 
 # =========================
@@ -186,10 +178,8 @@ def normalizar_texto(texto: str) -> str:
     if not texto:
         return ""
     t = texto.translate(QUOTES_MAP)
-    t = t.replace("\r\n", "\n").replace("\r", "\n")
-    t = re.sub(r"[ \t]+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"\s+([,.;:!?])", r"\1", t)
-    t = re.sub(r"\n{3,}", "\n\n", t)
     return t
 
 
@@ -197,7 +187,6 @@ def dividir_en_frases(texto: str) -> list[str]:
     t = normalizar_texto(texto)
     if not t:
         return []
-    t = re.sub(r"\s*\n+\s*", " ", t).strip()
 
     protect = {}
     for i, ab in enumerate(ABREVIATURAS):
@@ -238,6 +227,7 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
             continue
 
         cand = (" ".join(buf + [fr])).strip()
+
         if len(cand) <= max_chars and len(buf) < max_sentences:
             buf.append(fr)
             if len(buf) >= max_sentences:
@@ -266,136 +256,32 @@ def segmentar_para_slides(texto: str, max_chars: int, max_sentences: int) -> lis
     return [s for s in slides if s.strip()]
 
 
+def split_paragraphs_from_manual(text: str) -> list[str]:
+    t = (text or "").strip()
+    if not t:
+        return []
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", t) if p.strip()]
+    return [p for p in parts if len(normalizar_texto(p)) >= 10]
+
+
 # =========================
 # FONT
 # =========================
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    for p in POPPINS_BOLD_PATHS:
-        try:
-            if Path(p).exists():
-                return ImageFont.truetype(p, size)
-        except Exception:
-            pass
-
     for candidate in ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf"]:
         try:
             return ImageFont.truetype(candidate, size)
         except Exception:
             pass
-
     return ImageFont.load_default()
 
 
 # =========================
-# ELTIEMPO: PLAYWRIGHT RESUMEN REAL
-# =========================
-def _pw_get_resumen(url: str, headers: dict, cookies_json: str | None = None) -> str:
-    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-    import re
-    import json
-
-    with sync_playwright() as p:
-        import os
-
-        browser = p.chromium.launch(
-            headless=True,
-            executable_path=os.getenv("CHROMIUM_PATH", "/usr/bin/chromium"),
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-setuid-sandbox",
-            ],
-        )
-
-        context = browser.new_context(
-            user_agent=headers.get("User-Agent"),
-            locale="es-ES",
-            extra_http_headers={
-                "Accept-Language": headers.get("Accept-Language", "es-ES,es;q=0.9"),
-                "Referer": headers.get("Referer", "https://www.eltiempo.com/"),
-            },
-        )
-
-        if cookies_json:
-            try:
-                ck = json.loads(cookies_json)
-                if isinstance(ck, list) and ck:
-                    context.add_cookies(ck)
-            except Exception:
-                pass
-
-        page = context.new_page()
-
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-            # Cerrar banners (best-effort)
-            for sel in [
-                "button#didomi-notice-agree-button",
-                "button:has-text('Aceptar')",
-                "button:has-text('Entendido')",
-                "button:has-text('Continuar')",
-            ]:
-                try:
-                    page.locator(sel).first.click(timeout=1200)
-                    break
-                except Exception:
-                    pass
-
-            # Esperar el bloque de compartir
-            page.wait_for_selector(".c-articulo__compartir-media", timeout=20000)
-            cont = page.locator(".c-articulo__compartir-media").first
-
-            # Botón Resumen (a veces duplicado → first(), y si no, por rol)
-            btn = cont.locator("button.c-articulo__compartir-media__elemento--resumen").first
-            try:
-                btn.wait_for(state="visible", timeout=12000)
-                btn.click(timeout=12000)
-            except Exception:
-                cont.get_by_role("button", name=re.compile(r"Resumen", re.I)).first.click(timeout=12000)
-
-            # Esperar contenido del resumen (OJO: en Locator se usa wait_for, no wait_for_selector)
-            resumen_loc = cont.locator(".c-articulo__compartir-media__elemento--resumen-content").first
-            resumen_loc.wait_for(state="visible", timeout=20000)
-
-            # Extraer texto preservando <br>
-            try:
-                txt = resumen_loc.inner_text(timeout=5000)
-            except Exception:
-                txt = resumen_loc.evaluate(
-                    """(node) => {
-                        const clone = node.cloneNode(true);
-                        clone.querySelectorAll('br').forEach(br => br.replaceWith('\\n'));
-                        return (clone.textContent || '').trim();
-                    }"""
-                )
-
-            return normalizar_texto(txt)
-
-        except PlaywrightTimeoutError:
-            return ""
-
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
-            try:
-                context.close()
-            except Exception:
-                pass
-            try:
-                browser.close()
-            except Exception:
-                pass
-
-
-# =========================
-# SCRAPER ELTIEMPO
+# SCRAPER ELTIEMPO (cached)
 # =========================
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def extraer_contenido_articulo(url: str) -> tuple[str, str, list[str]]:
+def extraer_contenido_articulo(url: str) -> tuple[str, list[str], list[str]]:
     r = requests.get(url, headers=HEADERS_FAKE, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.content, "html.parser")
@@ -405,25 +291,23 @@ def extraer_contenido_articulo(url: str) -> tuple[str, str, list[str]]:
         raise ValueError("No se pudo encontrar el título del artículo.")
     titulo = titulo_el.get_text(" ", strip=True)
 
-    # 1) intentar HTML directo
-    resumen = ""
-    resumen_el = (
-        soup.select_one("p.c-articulo__compartir-media__elemento--resumen-content")
-        or soup.select_one(".c-articulo__compartir-media__elemento--resumen-content")
-    )
-    if resumen_el:
-        resumen = normalizar_texto(resumen_el.get_text(separator="\n", strip=True))
+    cuerpo = soup.find("div", class_="c-cuerpo") or soup.find("article")
+    if not cuerpo:
+        raise ValueError("No se pudo encontrar el cuerpo del artículo.")
 
-    # 2) fallback Playwright
-    if len(normalizar_texto(resumen)) < 40:
-        cookies_json = os.getenv("ELTIEMPO_COOKIES_JSON", "").strip() or None
-        resumen = _pw_get_resumen(url, HEADERS_FAKE, cookies_json=cookies_json)
+    parrafos = []
+    divs = cuerpo.find_all("div", class_="paragraph")
+    for d in divs:
+        t = d.get_text(" ", strip=True)
+        if t:
+            parrafos.append(t)
 
-    if len(normalizar_texto(resumen)) < 40:
-        raise ValueError("No pude obtener el resumen (ni por HTML ni por Playwright).")
+    if not parrafos:
+        for p in cuerpo.find_all("p"):
+            t = p.get_text(" ", strip=True)
+            if len(t) > 50:
+                parrafos.append(t)
 
-    # Imágenes (HTML)
-    cuerpo = soup.find("div", class_="c-cuerpo") or soup.find("article") or soup
     imagenes_urls = set()
 
     def limpiar_url(u):
@@ -462,11 +346,7 @@ def extraer_contenido_articulo(url: str) -> tuple[str, str, list[str]]:
         for img in galeria.find_all("img"):
             agregar_img(img)
 
-    if len(imagenes_urls) < 3:
-        for img in soup.find_all("img"):
-            agregar_img(img)
-
-    return titulo, resumen, list(imagenes_urls)
+    return titulo, parrafos, list(imagenes_urls)
 
 
 # =========================
@@ -478,25 +358,6 @@ def ajustar_imagen(imagen: Image.Image, target_height: int) -> Image.Image:
     return imagen.resize((nueva_w, target_height), Image.LANCZOS)
 
 
-def cover_resize(im: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    im = im.convert("RGB")
-    src_w, src_h = im.size
-    scale = max(target_w / src_w, target_h / src_h)
-    new_w, new_h = int(src_w * scale), int(src_h * scale)
-    im2 = im.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - target_w) // 2
-    top = (new_h - target_h) // 2
-    return im2.crop((left, top, left + target_w, top + target_h))
-
-
-def contain_resize(im: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    im = im.convert("RGB")
-    src_w, src_h = im.size
-    scale = min(target_w / src_w, target_h / src_h)
-    new_w, new_h = int(src_w * scale), int(src_h * scale)
-    return im.resize((new_w, new_h), Image.LANCZOS)
-
-
 def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -505,11 +366,13 @@ def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) ->
             resp = requests.get(u, headers=HEADERS_FAKE, timeout=20)
             resp.raise_for_status()
             img = Image.open(BytesIO(resp.content))
+            # Ajuste genérico inicial, luego se refina en render_slide
+            # Usamos 1080 como base de altura mínima aceptable
             img = ajustar_imagen(img, target_height=1080).convert("RGB")
             name = hashlib.md5(u.encode("utf-8")).hexdigest()
-            pth = out_dir / f"img_{name}.jpg"
-            img.save(pth, quality=92)
-            return pth
+            p = out_dir / f"img_{name}.jpg"
+            img.save(p, quality=92)
+            return p
         except Exception:
             return None
 
@@ -517,9 +380,9 @@ def descargar_imagenes(urls: list[str], out_dir: Path, max_workers: int = 10) ->
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(fetch, u) for u in urls]
         for f in as_completed(futs):
-            pth = f.result()
-            if pth:
-                paths.append(pth)
+            p = f.result()
+            if p:
+                paths.append(p)
     return paths
 
 
@@ -529,6 +392,7 @@ def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
     for uf in (uploaded_files or []):
         try:
             img = Image.open(BytesIO(uf.read()))
+            # Igual, ajuste base
             img = ajustar_imagen(img, target_height=1080).convert("RGB")
             safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", uf.name)
             pth = out_dir / f"upload_{safe_name}"
@@ -540,32 +404,52 @@ def guardar_imagenes_subidas(uploaded_files, out_dir: Path) -> list[Path]:
 
 
 def render_slide(
-    imagen_path: Path,
-    texto: str,
-    idx: int,
-    out_dir: Path,
-    config: VideoModeConfig,
+    imagen_path: Path, 
+    texto: str, 
+    idx: int, 
+    out_dir: Path, 
+    config: VideoModeConfig
 ) -> list[Path]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    RES_W, RES_H = config.width, config.height
-    FONT_SIZE = config.font_size
-    RENDER_WRAP_WIDTH = config.wrap_width
-    RENDER_LINES_PER_IMAGE = config.lines_per_image
-
     imagen = Image.open(imagen_path).convert("RGB")
-
-    bg = cover_resize(imagen, RES_W, RES_H)
-    bg = bg.filter(ImageFilter.GaussianBlur(radius=22))
-
-    overlay = Image.new("RGB", (RES_W, RES_H), (0, 0, 0))
-    bg = Image.blend(bg, overlay, alpha=0.18)
-
-    fg = contain_resize(imagen, RES_W, RES_H)
-
-    fondo = bg.copy()
-    pos = ((RES_W - fg.width) // 2, (RES_H - fg.height) // 2)
-    fondo.paste(fg, pos)
+    
+    # --- LOGICA VERTICAL ---
+    if config.is_vertical:
+        # 1. Background: Blurred filling screen
+        bg_ratio = config.width / config.height
+        img_ratio = imagen.width / max(1, imagen.height)
+        
+        # Resize to cover
+        if img_ratio > bg_ratio:
+            # Mas ancha que el destino -> ajustar por altura
+            new_h = config.height
+            new_w = int(new_h * img_ratio)
+        else:
+            # Mas alta/angosta -> ajustar por ancho
+            new_w = config.width
+            new_h = int(new_w / img_ratio)
+            
+        fondo = imagen.resize((new_w, new_h), Image.LANCZOS)
+        # Crop center
+        left = (fondo.width - config.width) // 2
+        top = (fondo.height - config.height) // 2
+        fondo = fondo.crop((left, top, left + config.width, top + config.height))
+        fondo = fondo.filter(ImageFilter.GaussianBlur(radius=30))
+        
+        # 2. Foreground: Fit width (1080), center vertical
+        fg_w = config.width
+        fg_h = int(fg_w / img_ratio)
+        fg = imagen.resize((fg_w, fg_h), Image.LANCZOS)
+        
+        y_pos = (config.height - fg_h) // 2
+        fondo.paste(fg, (0, y_pos))
+        
+    # --- LOGICA HORIZONTAL ---
+    else:
+        # Codigo original adaptado
+        imagen = ajustar_imagen(imagen, target_height=config.height)
+        fondo = Image.new("RGB", (config.width, config.height), color="black")
+        pos = ((config.width - imagen.width) // 2, (config.height - imagen.height) // 2)
+        fondo.paste(imagen, pos)
 
     texto = (texto or "").strip()
     if not texto:
@@ -573,17 +457,21 @@ def render_slide(
         fondo.save(out, quality=92)
         return [out]
 
-    fuente = load_font(FONT_SIZE)
+    fuente = load_font(config.font_size)
 
+    # Texto wrap
     lineas = textwrap.wrap(
         re.sub(r"\s+", " ", texto).strip(),
-        width=RENDER_WRAP_WIDTH,
+        width=config.wrap_width,
         break_long_words=False,
         break_on_hyphens=False,
     )
 
-    bloques = [lineas[i : i + RENDER_LINES_PER_IMAGE] for i in range(0, len(lineas), RENDER_LINES_PER_IMAGE)]
-    outs: list[Path] = []
+    # Si is_vertical y excedemos 1 linea, igual intentamos renderizar,
+    # aunque segmentar_para_slides deberia haberlo prevenido.
+    
+    bloques = [lineas[i : i + config.lines_per_image] for i in range(0, len(lineas), config.lines_per_image)]
+    outs = []
 
     for j, bloque in enumerate(bloques):
         base = fondo.copy()
@@ -595,14 +483,33 @@ def render_slide(
             heights.append(bbox[3] - bbox[1])
 
         total_h = sum(heights) + 10 * (len(bloque) - 1)
-        y0 = RES_H - total_h - 110
-        y = y0
+        
+        if config.is_vertical:
+            # Tercio inferior
+            # Inicio del tercio inferior:
+            y_start_zone = config.height * 2 / 3
+            # Centrado dentro del tercio inferior? O starting at top of bottom third?
+            # User: "centrado a un tercio inferior del total del alto"
+            # Interpetracion: El centro del bloque de texto debe estar en el centro del tercio inferior.
+            # Centro del tercio inferior = 2/3 H + (1/3 H)/2 = 5/6 H.
+            
+            center_y = config.height * 5 / 6
+            y0 = center_y - (total_h / 2)
+        else:
+            # Original logic: bottom area
+            y0 = config.height - total_h - 110
 
+        y = y0
+        
         for linea, h in zip(bloque, heights):
             bbox = d.textbbox((0, 0), linea, font=fuente)
             w = bbox[2] - bbox[0]
-            x = (RES_W - w) // 2
+            if config.is_vertical:
+                x = (config.width - w) // 2
+            else:
+                x = (config.width - w) // 2
 
+            # Sombra / Borde
             d.text(
                 (x, y),
                 linea,
@@ -713,14 +620,14 @@ def eleven_tts_long_to_mp3(
                 detail = r.text[:400]
             raise RuntimeError(f"ElevenLabs error {r.status_code}: {detail}")
 
-        pth = parts_dir / f"part_{i:04d}.mp3"
-        pth.write_bytes(r.content)
-        part_files.append(pth)
+        p = parts_dir / f"part_{i:04d}.mp3"
+        p.write_bytes(r.content)
+        part_files.append(p)
 
     list_file = (parts_dir / "concat_list.txt").resolve()
     with list_file.open("w", encoding="utf-8") as f:
-        for pth in part_files:
-            f.write(f"file '{pth.resolve().as_posix()}'\n")
+        for p in part_files:
+            f.write(f"file '{p.resolve().as_posix()}'\n")
 
     out_mp3 = out_mp3.resolve()
 
@@ -751,7 +658,7 @@ def eleven_tts_long_to_mp3(
 
 
 # =========================
-# AUDIO
+# AUDIO: build final audio clip (voice/music)
 # =========================
 def build_final_audio_clip(
     voice_path: Path | None,
@@ -782,17 +689,22 @@ def build_final_audio_clip(
 
     if voice_clip and music_clip:
         return CompositeAudioClip([music_clip, voice_clip]).set_duration(target_duration)
+
     if voice_clip:
         return voice_clip
+
     if music_clip:
         return music_clip
+
     return None
 
 
 # =========================
-# END CLIP + FIT
+# END CLIP (CIERRE) + FIT TO 1080P
 # =========================
 def fit_clip_to_config(clip: VideoFileClip, config: VideoModeConfig) -> VideoFileClip:
+    # Resize manteniendo aspect ratio para cubrir o ajustar según necesidad
+    # Para Horizontal (CIERRE) solemos querer que ocupe todo
     c = clip.resize(height=config.height)
     if c.w > config.width:
         x1 = (c.w - config.width) / 2
@@ -800,6 +712,7 @@ def fit_clip_to_config(clip: VideoFileClip, config: VideoModeConfig) -> VideoFil
         c = c.crop(x1=x1, x2=x2)
     elif c.w < config.width:
         c = c.on_color(size=(config.width, config.height), color=(0, 0, 0), pos=("center", "center"))
+    
     if c.h != config.height:
         c = c.resize(height=config.height)
     return c
@@ -810,9 +723,9 @@ def save_uploaded_video(uploaded_file, out_dir: Path, name: str) -> Path | None:
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(uploaded_file.name).suffix.lower() or ".mp4"
-    pth = out_dir / f"{name}{suffix}"
-    pth.write_bytes(uploaded_file.getvalue())
-    return pth
+    p = out_dir / f"{name}{suffix}"
+    p.write_bytes(uploaded_file.getvalue())
+    return p
 
 
 def save_uploaded_audio(uploaded_file, out_dir: Path) -> Path | None:
@@ -820,9 +733,18 @@ def save_uploaded_audio(uploaded_file, out_dir: Path) -> Path | None:
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", uploaded_file.name)
-    pth = out_dir / f"bgm_{safe_name}"
-    pth.write_bytes(uploaded_file.getvalue())
-    return pth
+    p = out_dir / f"bgm_{safe_name}"
+    p.write_bytes(uploaded_file.getvalue())
+    return p
+
+
+def save_uploaded_png(uploaded_file, out_dir: Path, name: str) -> Path | None:
+    if not uploaded_file:
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    p = out_dir / f"{name}.png"
+    p.write_bytes(uploaded_file.getvalue())
+    return p
 
 
 # =========================
@@ -851,6 +773,9 @@ def get_audio_duration(path: Path) -> float | None:
             pass
 
 
+
+
+
 def crear_video(
     textos_slides: list[str],
     imagenes: list[Path],
@@ -870,6 +795,7 @@ def crear_video(
     slides_dir = work_dir / "slides"
     slides_dir.mkdir(parents=True, exist_ok=True)
 
+    # 1) Render slides
     slide_imgs: list[Path] = []
     for idx, txt in enumerate(textos_slides):
         img_path = imagenes[idx % len(imagenes)]
@@ -878,6 +804,7 @@ def crear_video(
     if not slide_imgs:
         raise ValueError("No se generaron slides (slide_imgs vacío).")
 
+    # 2) Duración
     voice_duration = get_audio_duration(voice_path) if voice_path else None
 
     if voice_duration and voice_duration > 0:
@@ -887,9 +814,11 @@ def crear_video(
         per_slide = float(base_slide_duration)
         main_duration = per_slide * len(slide_imgs)
 
+    # 3) Main video
     image_clips = [ImageClip(str(p)).set_duration(per_slide) for p in slide_imgs]
     main_video = concatenate_videoclips(image_clips, method="compose")
 
+    # 4) Audio main
     target_audio_duration = float(voice_duration) if voice_duration and voice_duration > 0 else float(main_duration)
     audio_clip = build_final_audio_clip(
         voice_path=voice_path if (voice_path and voice_path.exists()) else None,
@@ -904,17 +833,24 @@ def crear_video(
     else:
         main_video = main_video.set_duration(main_duration)
 
+    # 6) Append CIERRE (solo si aplica)
+    # En modo vertical, el usuario pidió NO cierre. Podemos enforcear eso aquí o en UI.
+    # Si config.is_vertical, ignoramos cierre_video_path
+    
     final_clips = [main_video]
     cierre_clip = None
-    if (not config.is_vertical) and cierre_video_path and cierre_video_path.exists():
-        cierre_clip = VideoFileClip(str(cierre_video_path))
-        cierre_clip = fit_clip_to_config(cierre_clip, config)
-        final_clips.append(cierre_clip)
+
+    if not config.is_vertical: # SOLO HORIZONTAL SOPORTA CIERRE POR AHORA (SEGUN REQ)
+        if cierre_video_path and cierre_video_path.exists():
+            cierre_clip = VideoFileClip(str(cierre_video_path))
+            cierre_clip = fit_clip_to_config(cierre_clip, config)
+            final_clips.append(cierre_clip)
 
     final = concatenate_videoclips(final_clips, method="compose")
 
     out = work_dir / f"{safe_filename(titulo)}.mp4"
 
+    # 7) Encoding optimizado para Streamlit Cloud
     final.write_videofile(
         str(out),
         fps=int(fps),
@@ -958,19 +894,16 @@ def crear_video(
 # =========================
 # HELPERS
 # =========================
-def build_textos_slides(include_title: bool, titulo: str, resumen: str, config: VideoModeConfig) -> list[str]:
+def build_textos_slides(include_title: bool, titulo: str, selected_pars: list[str], config: VideoModeConfig) -> list[str]:
     textos_slides: list[str] = []
     if include_title:
         t = normalizar_texto(titulo)
         if t:
             textos_slides.extend(segmentar_para_slides(t, config.max_chars, config.max_sentences))
-
-    r = normalizar_texto(resumen)
-    if r:
-        partes = [p.strip() for p in re.split(r"\n+", r) if p.strip()]
-        for p in partes:
+    for p in selected_pars:
+        p = normalizar_texto(p)
+        if p:
             textos_slides.extend(segmentar_para_slides(p, config.max_chars, config.max_sentences))
-
     return [t for t in textos_slides if t.strip()]
 
 
@@ -980,10 +913,12 @@ def build_textos_slides(include_title: bool, titulo: str, resumen: str, config: 
 st.set_page_config(page_title="Video + Voz", layout="wide")
 st.title("Generador de Video con Narración (ElevenLabs)")
 
+require_pin_if_configured()
+
 with st.sidebar:
     st.header("ElevenLabs")
 
-    secret_key = os.getenv("ELEVENLABS_API_KEY", "")
+    secret_key = st.secrets.get("ELEVENLABS_API_KEY", "")
     use_secrets = st.checkbox("Usar API Key de Secrets", value=bool(secret_key))
     if use_secrets and secret_key:
         api_key = secret_key
@@ -999,7 +934,8 @@ with st.sidebar:
 
     output_format = st.selectbox("Formato (MP3)", ["mp3_44100_128", "mp3_44100_192"], index=0)
 
-    voice_name = st.selectbox("Voz", list(VOICE_OPTIONS.keys()), index=1)
+    # ✅ Voice ID en desplegable
+    voice_name = st.selectbox("Voz", list(VOICE_OPTIONS.keys()), index=1)  # default JC News
     voice_id_direct = VOICE_OPTIONS[voice_name]
     st.caption(f"voice_id = {voice_id_direct}")
 
@@ -1021,6 +957,7 @@ voice_settings = {
 st.divider()
 
 col_config_1, col_config_2 = st.columns(2)
+
 with col_config_1:
     modo = st.radio(
         "¿Cómo quieres ingresar el contenido?",
@@ -1035,7 +972,10 @@ with col_config_2:
         horizontal=True
     )
 
-current_config = CONFIG_VERTICAL if "Vertical" in orientacion_sel else CONFIG_HORIZONTAL
+if "Vertical" in orientacion_sel:
+    current_config = CONFIG_VERTICAL
+else:
+    current_config = CONFIG_HORIZONTAL
 
 output_mode = st.radio(
     "¿Cómo quieres el video?",
@@ -1050,14 +990,16 @@ overlay_text = want_text
 
 st.info(f"✅ Requisito: mínimo {MIN_IMAGES_REQUIRED} imágenes para generar.")
 
+
+# Estados
 if "extracted" not in st.session_state:
     st.session_state.extracted = None
+if "manual_paragraphs" not in st.session_state:
+    st.session_state.manual_paragraphs = []
 if "url_downloaded_images" not in st.session_state:
     st.session_state.url_downloaded_images = []
 if "manual_uploaded_images" not in st.session_state:
     st.session_state.manual_uploaded_images = []
-if "manual_resumen" not in st.session_state:
-    st.session_state.manual_resumen = ""
 
 
 def run_generate(
@@ -1068,35 +1010,22 @@ def run_generate(
     work_dir: Path,
     cierre_path: Path | None,
     config: VideoModeConfig,
-    want_voice: bool,
-    api_key: str,
-    voice_id: str,
-    model_id: str,
-    output_format: str,
-    voice_settings: dict,
-    use_bgm: bool,
-    bgm_file,
-    overlay_text: bool,
-    voice_volume: float,
-    music_volume: float,
-    music_fade: float,
-    base_slide_duration: float,
-    fps: int,
 ) -> Path:
     texto_narracion = normalizar_texto(" ".join(textos_slides))
 
+    # Voz
     voice_path = None
     if want_voice:
         if not api_key:
             raise ValueError("Falta API Key de ElevenLabs.")
-        if not voice_id:
+        if not voice_id_direct:
             raise ValueError("Voice ID inválido.")
         if not texto_narracion.strip():
             raise ValueError("No hay texto para narrar.")
         voice_path = eleven_tts_long_to_mp3(
             text=texto_narracion,
             api_key=api_key,
-            voice_id=voice_id,
+            voice_id=voice_id_direct,
             model_id=model_id,
             output_format=output_format,
             voice_settings=voice_settings,
@@ -1104,6 +1033,7 @@ def run_generate(
             work_dir=work_dir,
         )
 
+    # Música
     music_path = None
     if use_bgm:
         if bgm_file is None:
@@ -1145,18 +1075,19 @@ if modo == "Desde URL de El Tiempo":
 
     if st.button("1) Extraer contenido", type="primary", disabled=not bool(url)):
         try:
-            with st.spinner("Extrayendo (título + resumen real + imágenes)..."):
-                titulo, resumen, img_urls = extraer_contenido_articulo(url)
-
+            with st.spinner("Extrayendo..."):
+                titulo, parrafos, img_urls = extraer_contenido_articulo(url)
+            
+            # Descargar imágenes inmediatamente para mostrar preview
             temp_dir = Path(tempfile.mkdtemp(prefix="preview_imgs_"))
             with st.spinner("Descargando imágenes..."):
                 downloaded = descargar_imagenes(img_urls, temp_dir, max_workers=10)
                 if uploaded_extra:
                     downloaded.extend(guardar_imagenes_subidas(uploaded_extra, temp_dir))
-
-            st.session_state.extracted = {"titulo": titulo, "resumen": resumen, "img_urls": img_urls}
+            
+            st.session_state.extracted = {"titulo": titulo, "parrafos": parrafos, "img_urls": img_urls}
             st.session_state.url_downloaded_images = downloaded
-            st.success(f"Listo. Resumen OK | Imágenes: {len(downloaded)}")
+            st.success(f"Listo. Párrafos: {len(parrafos)} | Imágenes descargadas: {len(downloaded)}")
         except Exception as e:
             st.session_state.extracted = None
             st.session_state.url_downloaded_images = []
@@ -1166,45 +1097,59 @@ if modo == "Desde URL de El Tiempo":
 
     if data:
         st.divider()
-        st.subheader("2) Texto de insumo (Resumen)")
+        st.subheader("2) Selecciona y edita textos")
 
         include_title = st.checkbox("Incluir título", value=True, key="url_include_title")
         titulo_in = st.text_input("Título", value=data["titulo"], key="url_title")
 
-        resumen_in = st.text_area(
-            "Resumen (se usa para subtítulos y audio)",
-            value=data["resumen"],
-            height=220,
-            key="url_resumen",
-        )
+        st.write("Párrafos (marca los que quieres incluir):")
+        selected_pars = []
+        for i, p in enumerate(data["parrafos"]):
+            col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment="top")
+            with col_chk:
+                ck = st.checkbox("Usar", value=True, key=f"url_par_ck_{i}")
+            with col_txt:
+                txt = st.text_area(label=f"Párrafo {i+1}", value=p, height=90, key=f"url_par_txt_{i}")
+            if ck:
+                selected_pars.append(txt)
+
 
         st.divider()
+        
+        # Image Selection UI - URL Mode
         st.subheader("2.5) Selecciona imágenes")
-
+        
         all_imgs = st.session_state.url_downloaded_images
-        selected_imgs = []
         if all_imgs:
+            st.write(f"Imágenes disponibles ({len(all_imgs)}):")
+            selected_imgs = []
+            
+            # Display images in rows of 3
             cols_per_row = 3
             for i in range(0, len(all_imgs), cols_per_row):
-                row_imgs = all_imgs[i:i + cols_per_row]
+                row_imgs = all_imgs[i:i+cols_per_row]
                 cols = st.columns(cols_per_row)
+                
                 for j, img_path in enumerate(row_imgs):
                     img_idx = i + j
                     with cols[j]:
-                        st.image(str(img_path), use_container_width=True, caption=f"Imagen {img_idx+1}")
+                        st.image(str(img_path), width='stretch', caption=f"Imagen {img_idx+1}")
                         use_img = st.checkbox(
-                            f"Usar imagen {img_idx+1}",
-                            value=True,
-                            key=f"url_img_ck_{img_idx}",
+                            f"Usar imagen {img_idx+1}", 
+                            value=True, 
+                            key=f"url_img_ck_{img_idx}"
                         )
                         if use_img:
                             selected_imgs.append(img_path)
         else:
             st.info("No hay imágenes descargadas. Ejecuta 'Extraer contenido' primero.")
-
+            selected_imgs = []
+        
         st.divider()
+
         st.subheader("Configuración de Audio y Cierre")
 
+        # Música UI - URL Mode
         st.markdown("#### Música (Audio Network)")
         bgm_file = st.file_uploader(
             "Sube música de fondo (MP3/WAV)",
@@ -1231,10 +1176,11 @@ if modo == "Desde URL de El Tiempo":
 
         c4, c5 = st.columns(2)
         with c4:
-            fps = st.selectbox("FPS (rec. 15)", [15, 24], index=0, key="fps_url")
+             fps = st.selectbox("FPS (rec. 15)", [15, 24], index=0, key="fps_url")
         with c5:
-            base_slide_duration = st.slider("Dur. slide (sin voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key="bsd_url")
+             base_slide_duration = st.slider("Dur. slide (sin voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key="bsd_url")
 
+        # Cierre UI - URL Mode
         cierre_video_upload = None
         if not current_config.is_vertical:
             st.markdown("#### Video de Cierre (opcional)")
@@ -1259,11 +1205,8 @@ if modo == "Desde URL de El Tiempo":
             if include_title and not (titulo_in or "").strip():
                 st.error("Marcaste 'Incluir título' pero el título está vacío.")
                 st.stop()
-            if not (resumen_in or "").strip():
-                st.error("El resumen está vacío.")
-                st.stop()
-            if len(selected_imgs) < MIN_IMAGES_REQUIRED:
-                st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Seleccionaste {len(selected_imgs)}.")
+            if not selected_pars and not include_title:
+                st.error("No hay textos seleccionados (ni título ni párrafos).")
                 st.stop()
 
             work_dir = Path(tempfile.mkdtemp(prefix="url_video_"))
@@ -1272,13 +1215,24 @@ if modo == "Desde URL de El Tiempo":
 
             progress = st.progress(0, text="Iniciando...")
             try:
-                progress.progress(10, text="Preparando texto (slides) desde Resumen...")
+                progress.progress(10, text="Preparando textos (slides)...")
                 titulo_final = normalizar_texto(titulo_in) if include_title else "video"
-                textos_slides = build_textos_slides(include_title, titulo_in, resumen_in, config=current_config)
+                textos_slides = build_textos_slides(include_title, titulo_in, selected_pars, config=current_config)
                 if not textos_slides:
-                    raise ValueError("No quedó texto para slides tras segmentar.")
+                    raise ValueError("No quedaron textos para slides tras segmentar.")
 
-                progress.progress(30, text="Copiando imágenes seleccionadas...")
+                progress.progress(30, text="Preparando imágenes seleccionadas...")
+                # Usar imágenes seleccionadas en lugar de descargar nuevamente
+                if not selected_imgs:
+                    st.error("No has seleccionado ninguna imagen.")
+                    st.stop()
+                
+                # ✅ validar mínimo de imágenes
+                if len(selected_imgs) < MIN_IMAGES_REQUIRED:
+                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente seleccionaste {len(selected_imgs)}. Selecciona más imágenes.")
+                    st.stop()
+                
+                # Copiar imágenes seleccionadas al directorio de trabajo
                 imgs = []
                 for img_src in selected_imgs:
                     img_dst = imgs_dir / img_src.name
@@ -1295,20 +1249,6 @@ if modo == "Desde URL de El Tiempo":
                     work_dir=work_dir,
                     cierre_path=cierre_path,
                     config=current_config,
-                    want_voice=want_voice,
-                    api_key=api_key,
-                    voice_id=voice_id_direct,
-                    model_id=model_id,
-                    output_format=output_format,
-                    voice_settings=voice_settings,
-                    use_bgm=use_bgm,
-                    bgm_file=bgm_file,
-                    overlay_text=overlay_text,
-                    voice_volume=voice_volume,
-                    music_volume=music_volume,
-                    music_fade=music_fade,
-                    base_slide_duration=base_slide_duration,
-                    fps=int(fps),
                 )
 
                 progress.progress(100, text="Listo ✅")
@@ -1316,6 +1256,7 @@ if modo == "Desde URL de El Tiempo":
                 video_bytes = out_video.read_bytes()
                 st.video(video_bytes)
                 st.download_button("Descargar MP4", data=video_bytes, file_name=out_video.name, mime="video/mp4")
+
             except Exception as e:
                 st.error(f"Error: {e}")
             finally:
@@ -1325,6 +1266,212 @@ if modo == "Desde URL de El Tiempo":
                     pass
     else:
         st.info("Pega una URL y presiona **Extraer contenido** para empezar.")
+
+
+# =========================
+# MODO MANUAL
+# =========================
 else:
     st.subheader("Texto e imágenes manual")
-    st.info("Este modo quedó igual que antes (no lo tocamos).")
+
+    colL, colR = st.columns([1, 1])
+    with colL:
+        include_title_m = st.checkbox("Incluir título", value=True, key="manual_include_title")
+        titulo_m = st.text_input("Título", value="", key="manual_title")
+    with colR:
+        uploaded_manual_imgs = st.file_uploader(
+            "Sube imágenes (mínimo 5)",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key="manual_imgs",
+        )
+
+    texto_manual = st.text_area(
+        "Pega aquí el texto completo (se separa por párrafos usando líneas en blanco)",
+        height=220,
+        key="manual_text",
+    )
+
+    if st.button("1) Cargar texto", type="primary", key="manual_load_text"):
+        pars = split_paragraphs_from_manual(texto_manual)
+        st.session_state.manual_paragraphs = pars
+        
+        # Guardar imágenes uploaded inmediatamente para preview
+        if uploaded_manual_imgs:
+            temp_dir = Path(tempfile.mkdtemp(prefix="manual_preview_imgs_"))
+            saved_imgs = guardar_imagenes_subidas(uploaded_manual_imgs, temp_dir)
+            st.session_state.manual_uploaded_images = saved_imgs
+            st.success(f"Texto cargado. Párrafos detectados: {len(pars)} | Imágenes: {len(saved_imgs)}")
+        else:
+            st.session_state.manual_uploaded_images = []
+            st.success(f"Texto cargado. Párrafos detectados: {len(pars)}")
+
+    if st.session_state.manual_paragraphs:
+        st.divider()
+        st.subheader("2) Selecciona y edita textos")
+
+        selected_pars = []
+        for i, p in enumerate(st.session_state.manual_paragraphs):
+            col_chk, col_txt = st.columns([0.12, 0.88], vertical_alignment="top")
+            with col_chk:
+                ck = st.checkbox("Usar", value=True, key=f"manual_par_ck_{i}")
+            with col_txt:
+                txt = st.text_area(label=f"Párrafo {i+1}", value=p, height=90, key=f"manual_par_txt_{i}")
+            if ck:
+                selected_pars.append(txt)
+
+        st.divider()
+        
+        # Image Selection UI - Manual Mode
+        st.subheader("2.5) Selecciona imágenes")
+        
+        all_imgs = st.session_state.manual_uploaded_images
+        if all_imgs:
+            st.write(f"Imágenes disponibles ({len(all_imgs)}):")
+            selected_imgs = []
+            
+            # Display images in rows of 3
+            cols_per_row = 3
+            for i in range(0, len(all_imgs), cols_per_row):
+                row_imgs = all_imgs[i:i+cols_per_row]
+                cols = st.columns(cols_per_row)
+                
+                for j, img_path in enumerate(row_imgs):
+                    img_idx = i + j
+                    with cols[j]:
+                        st.image(str(img_path), width='stretch', caption=f"Imagen {img_idx+1}")
+                        use_img = st.checkbox(
+                            f"Usar imagen {img_idx+1}", 
+                            value=True, 
+                            key=f"manual_img_ck_{img_idx}"
+                        )
+                        if use_img:
+                            selected_imgs.append(img_path)
+        else:
+            st.info("No hay imágenes cargadas. Sube imágenes y presiona 'Cargar texto'.")
+            selected_imgs = []
+        
+        st.divider()
+
+        st.subheader("Configuración de Audio y Cierre")
+
+        # Música UI - Manual Mode
+        st.markdown("#### Música (Audio Network)")
+        bgm_file = st.file_uploader(
+            "Sube música de fondo (MP3/WAV)",
+            type=["mp3", "wav"],
+            accept_multiple_files=False,
+            key="bgm_upload_manual",
+        )
+
+        use_bgm = False
+        if want_music_required:
+            use_bgm = True
+            st.info("En **Solo Texto + Música**, la música es obligatoria.")
+        else:
+            if bgm_file is not None:
+                use_bgm = st.checkbox("Usar esta música como fondo", value=False, key="use_bgm_manual")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            music_volume = st.slider("Volumen música", 0.0, 1.0, 0.18, 0.01, key="mv_manual")
+        with c2:
+            voice_volume = st.slider("Volumen voz", 0.0, 2.0, 1.0, 0.05, key="vv_manual")
+        with c3:
+            music_fade = st.slider("Fade música (seg)", 0.0, 3.0, 1.0, 0.1, key="mf_manual")
+
+        c4, c5 = st.columns(2)
+        with c4:
+             fps = st.selectbox("FPS (rec. 15)", [15, 24], index=0, key="fps_manual")
+        with c5:
+             base_slide_duration = st.slider("Dur. slide (sin voz)", 2.0, 12.0, DEFAULT_SLIDE_DURATION, 0.5, key="bsd_manual")
+
+        # Cierre UI - Manual Mode
+        cierre_video_upload = None
+        if not current_config.is_vertical:
+            st.markdown("#### Video de Cierre (opcional)")
+            cierre_video_upload = st.file_uploader(
+                "Video de cierre (opcional) - MP4/MOV/WEBM",
+                type=["mp4", "mov", "webm"],
+                accept_multiple_files=False,
+                key="cierre_video_manual",
+            )
+        else:
+            st.info("ℹ️ El video de cierre no está disponible en formato Vertical.")
+
+        st.subheader("3) Generar video")
+
+        if st.button("Generar video", type="primary", key="manual_generate"):
+            if want_voice and not api_key:
+                st.error("Falta API Key de ElevenLabs.")
+                st.stop()
+            if want_music_required and bgm_file is None:
+                st.error("En 'Solo Texto + Música' debes subir música.")
+                st.stop()
+            if include_title_m and not (titulo_m or "").strip():
+                st.error("Marcaste 'Incluir título' pero el título está vacío.")
+                st.stop()
+            if not selected_pars and not include_title_m:
+                st.error("No hay textos seleccionados (ni título ni párrafos).")
+                st.stop()
+            if not uploaded_manual_imgs:
+                st.error(f"En modo manual debes subir al menos {MIN_IMAGES_REQUIRED} imágenes.")
+                st.stop()
+
+            work_dir = Path(tempfile.mkdtemp(prefix="manual_video_"))
+            imgs_dir = work_dir / "imgs"
+            imgs_dir.mkdir(exist_ok=True)
+
+            progress = st.progress(0, text="Iniciando...")
+            try:
+                progress.progress(10, text="Preparando textos (slides)...")
+                titulo_final = normalizar_texto(titulo_m) if include_title_m else "video"
+                textos_slides = build_textos_slides(include_title_m, titulo_m, selected_pars, config=current_config)
+                if not textos_slides:
+                    raise ValueError("No quedaron textos para slides tras segmentar.")
+
+                progress.progress(30, text="Preparando imágenes seleccionadas...")
+                # Usar imágenes seleccionadas en lugar de todas las subidas
+                if not selected_imgs:
+                    st.error("No has seleccionado ninguna imagen.")
+                    st.stop()
+                
+                # ✅ validar mínimo de imágenes
+                if len(selected_imgs) < MIN_IMAGES_REQUIRED:
+                    st.error(f"Necesitas mínimo {MIN_IMAGES_REQUIRED} imágenes. Actualmente seleccionaste {len(selected_imgs)}. Selecciona más imágenes.")
+                    st.stop()
+                
+                # Copiar imágenes seleccionadas al directorio de trabajo
+                imgs = []
+                for img_src in selected_imgs:
+                    img_dst = imgs_dir / img_src.name
+                    shutil.copy(img_src, img_dst)
+                    imgs.append(img_dst)
+
+                cierre_path = save_uploaded_video(cierre_video_upload, work_dir / "endclips", "cierre")
+
+                progress.progress(60, text="Generando voz/música y renderizando video...")
+                out_video = run_generate(
+                    titulo_final=titulo_final,
+                    textos_slides=textos_slides,
+                    imagenes_paths=imgs,
+                    work_dir=work_dir,
+                    cierre_path=cierre_path,
+                    config=current_config,
+                )
+
+                progress.progress(100, text="Listo ✅")
+                st.success("Video creado.")
+                video_bytes = out_video.read_bytes()
+                st.video(video_bytes)
+                st.download_button("Descargar MP4", data=video_bytes, file_name=out_video.name, mime="video/mp4")
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+            finally:
+                try:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                except Exception:
+                    pass
+    else:
+        st.info("Pega texto y presiona **Cargar texto** para generar los párrafos seleccionables.")
